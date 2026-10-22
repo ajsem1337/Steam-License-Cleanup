@@ -1,0 +1,11 @@
+// ==UserScript==
+// @name         Steam License Cleanup
+// @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
+// @version      2.0.0
+// @description  Reviews free Steam licenses with cleanup profiles, local demo verification, ownership checks, export, and cancellable scanning and removal.
+// @author       PatrickJnr, ajsem1337
+// @match        https://store.steampowered.com/account/licenses*
+// @grant        none
+// @updateURL    https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/fix/steam-license-pagination/Steam-License-Cleanup.user.js
+// @downloadURL  https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/fix/steam-license-pagination/Steam-License-Cleanup.user.js
+// ==/UserScript==

@@ -43,7 +43,7 @@ async function setup(t, handler, settings = {}) {
     const timers = [];
     window.g_sessionID = 'test-session';
     window.TextDecoder = TextDecoder;
-    window.localStorage.setItem('steamLicenseCleanupSettings', JSON.stringify({
+    if (settings !== null) window.localStorage.setItem('steamLicenseCleanupSettings', JSON.stringify({
         verifiedDemosOnly: false, keywords: ['demo'], exclusions: [], removalDelay: 0, ...settings
     }));
     window.fetch = async (url, options = {}) => {
@@ -111,7 +111,7 @@ function metadataFiles(apps, packages, appVersion = 41, packageVersion = 40) {
     appData.forEach(collect);
     const entries = appData.map((data, i) => {
         const fields = Buffer.alloc(appVersion >= 40 ? 60 : 40);
-        fields.writeUInt32LE(2, 0);
+        fields.writeUInt32LE(apps[i].infoState ?? 2, 0);
         fields.writeUInt32LE(1792699200, 4);
         const payload = kv(data, appVersion === 41 ? pool : null);
         return Buffer.concat([u32(apps[i].id), u32(fields.length + payload.length), fields, payload]);
@@ -485,7 +485,7 @@ test('a queue containing only duplicate requests reports zero confirmed removals
         ? new Response('{"success":"29"}') : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
     app.window.console.warn = () => {};
     app.setOwnership((request, requests) => new Response(JSON.stringify({
-        rgOwnedPackages: requests.length <= 2 ? [1, 2, 999] : requests.length === 3 ? [2, 999] : [999]
+        rgOwnedPackages: requests.length <= 2 ? [1, 2, 999] : requests.length <= 4 ? [2, 999] : [999]
     })));
     await app.scan();
     app.remove();
@@ -548,7 +548,7 @@ test('repeated limits preserve the queue beyond four attempts and cap backoff at
     }
     await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
     assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['1', '2', '2', '2', '2', '2', '2', '2', '3']);
-    assert.equal(app.ownershipRequests.length, 8);
+    assert.equal(app.ownershipRequests.length, 10, 'scan, initial ownership, two subsequent packages and six cooldown refreshes');
     assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup complete.*Successfully removed 3/s);
 });
 
@@ -571,7 +571,7 @@ test('ownership refreshed after a rate limit skips a lost package without retryi
         license(1, 'First Demo'), license(2, 'Lost Demo'), license(3, 'Last Demo')
     ])) : new Response(request.body.get('packageid') === '2' ? '{"success":84}' : '{"success":1}'));
     app.setOwnership((request, requests) => new Response(JSON.stringify({
-        rgOwnedPackages: requests.length <= 2 ? [1, 2, 3] : [1, 3]
+        rgOwnedPackages: requests.length <= 3 ? [1, 2, 3] : [1, 3]
     })));
     await app.scan();
     app.remove();
@@ -719,3 +719,272 @@ for (const kind of ['missing-file', 'truncated', 'unsupported-version', 'invalid
         assert.equal(app.requests.length, 0);
     });
 }
+
+const chooseProfile = (app, value) => {
+    const select = app.document.getElementById('cleanup-profile');
+    select.value = value;
+    select.dispatchEvent(new app.window.Event('change'));
+};
+const closeDialog = app => app.document.getElementById('modal-close').click();
+const reviewIds = app => [...app.document.querySelectorAll('#review-list li')]
+    .map(row => /Package ID: (\d+)/.exec(row.textContent)[1]);
+
+for (const [profile, expected] of [
+    ['playtests', ['2', '3']], ['videos', ['4']], ['soundtracks', ['5']],
+    ['all', ['1', '2', '3', '4', '5', '6', '7']], ['custom', ['1']]
+]) {
+    test(`${profile} profile uses its own rules and preserves custom keywords`, async t => {
+        const app = await setup(t, () => new Response(page([
+            license(1, 'Sample Demo'), license(2, 'Sample Playtest'), license(3, 'Sample Beta'),
+            license(4, 'Sample Trailer'), license(5, 'Sample Soundtrack'), license(6, 'Sample Game'),
+            license(7, 'Betaine'), license(8, 'Paid Soundtrack', undefined, false), license(9, 'Keep Beta')
+        ])), { exclusions: ['Keep'] });
+        chooseProfile(app, profile);
+        await app.scan();
+        assert.deepEqual(reviewIds(app), expected);
+        assert.equal(app.document.getElementById('metadata-controls').hidden, true);
+        assert.match(app.document.querySelector('.modal-body').textContent, /NOT been verified/);
+        assert.deepEqual(JSON.parse(app.window.localStorage.getItem('steamLicenseCleanupSettings')).keywords, ['demo']);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('legacy custom settings migrate without losing filters, exclusions or delay', async t => {
+    const app = await setup(t, () => new Response(page([])), { keywords: ['C++'], exclusions: ['keep'], removalDelay: 12345 });
+    assert.equal(app.document.getElementById('cleanup-profile').value, 'custom');
+    app.document.getElementById('settings-button').click();
+    assert.equal(app.document.getElementById('keywords-textarea').value, 'C++');
+    assert.equal(app.document.getElementById('exclusions-textarea').value, 'keep');
+    assert.equal(Number(app.document.getElementById('delay-input').value) * 60000, 12345);
+});
+
+test('invalid saved settings fall back to usable defaults without hiding controls', async t => {
+    const app = await setup(t, () => new Response(page([])), {
+        profile: '__proto__', keywords: 'demo', exclusions: [5], removalDelay: -10
+    });
+    app.document.getElementById('settings-button').click();
+    assert.match(app.document.getElementById('keywords-textarea').value, /demo/);
+    assert.equal(app.document.getElementById('exclusions-textarea').value, '');
+    assert.equal(app.document.getElementById('delay-input').value, '10');
+});
+
+test('settings use minutes, reject invalid delays and save only after validation', async t => {
+    const app = await setup(t, () => new Response(page([])));
+    app.document.getElementById('settings-button').click();
+    app.document.getElementById('delay-input').value = '-1';
+    const save = () => [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Save').click();
+    save();
+    assert.match(app.document.getElementById('settings-error').textContent, /Enter a delay/);
+    assert.equal(JSON.parse(app.window.localStorage.getItem('steamLicenseCleanupSettings')).removalDelay, 0);
+    app.document.getElementById('delay-input').value = '0.5';
+    save();
+    assert.equal(JSON.parse(app.window.localStorage.getItem('steamLicenseCleanupSettings')).removalDelay, 30000);
+    assert.equal(app.document.querySelector('.modal-overlay'), null);
+});
+
+test('reset persists defaults and returns to the demo profile', async t => {
+    const app = await setup(t, () => new Response(page([])));
+    app.document.getElementById('settings-button').click();
+    [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Reset to Default').click();
+    assert.equal(app.document.getElementById('cleanup-profile').value, 'demos');
+    assert.equal(app.document.getElementById('metadata-controls').hidden, false);
+    assert.equal(app.document.getElementById('keywords-textarea').disabled, true);
+    assert.equal(JSON.parse(app.window.localStorage.getItem('steamLicenseCleanupSettings')).profile, 'demos');
+});
+
+test('review search, visible selection and sorting preserve exact selected package identities', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page([
+        license(1, 'Zebra Demo', '1 Jan, 2026'), license(2, 'Alpha Demo', '3 Jan, 2026'), license(3, 'Other Demo', '2 Jan, 2026')
+    ])));
+    await app.scan();
+    const search = app.document.getElementById('review-search');
+    search.value = 'Alpha';
+    search.dispatchEvent(new app.window.Event('input'));
+    app.document.getElementById('deselect-all').click();
+    assert.match(app.document.getElementById('review-count').textContent, /1 of 3 visible; 2 selected/);
+    search.value = '';
+    search.dispatchEvent(new app.window.Event('input'));
+    const sort = app.document.getElementById('review-sort');
+    sort.value = 'name'; sort.dispatchEvent(new app.window.Event('change'));
+    assert.deepEqual(reviewIds(app), ['2', '3', '1']);
+    sort.value = 'newest'; sort.dispatchEvent(new app.window.Event('change'));
+    assert.deepEqual(reviewIds(app), ['2', '3', '1']);
+    assert.equal(app.document.querySelector('#review-list li input').checked, false);
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['3', '1']);
+});
+
+test('exporting the review includes selected hidden rows and never removes anything', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
+    await app.scan();
+    let exported;
+    app.window.URL.createObjectURL = blob => { exported = blob; return 'blob:test'; };
+    app.window.URL.revokeObjectURL = () => {};
+    app.window.HTMLAnchorElement.prototype.click = () => {};
+    app.document.getElementById('review-search').value = 'First';
+    app.document.getElementById('review-search').dispatchEvent(new app.window.Event('input'));
+    app.document.getElementById('export-review-button').click();
+    const text = await new Promise(resolve => {
+        const reader = new app.window.FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.readAsText(exported);
+    });
+    assert.match(text, /review only; no removal confirmed/);
+    assert.match(text, /First Demo/); assert.match(text, /Second Demo/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+for (const change of ['profile', 'date', 'settings', 'metadata']) {
+    test(`changing ${change} invalidates a pending confirmation before any POST`, async t => {
+        const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page([license(1, 'First Demo')])));
+        await app.scan();
+        app.document.getElementById('review-proceed-button').click();
+        if (change === 'profile') chooseProfile(app, 'all');
+        if (change === 'date') app.document.getElementById('start-date-input').value = '2026-01-01';
+        if (change === 'settings') {
+            app.document.getElementById('settings-button').click();
+            app.document.getElementById('exclusions-textarea').value = 'First';
+            [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Save').click();
+        }
+        if (change === 'metadata') await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo' }], [{ id: 1, apps: [10] }]));
+        [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Yes, Clean Up').click();
+        assert.match(app.document.body.textContent, /Scan Again/);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('cancelling a rate-limited scan interrupts the wait and never offers partial results', async t => {
+    const app = await setup(t, () => new Response('', { status: 429 }));
+    app.document.getElementById('scan-button').click();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 30000));
+    app.document.getElementById('cancel-scan-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Scan Cancelled');
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.equal(app.document.getElementById('scan-button').disabled, false);
+    assert.equal(app.requests.length, 1);
+    assert.equal(app.timers.some(timer => timer.active && timer.delay === 30000), false);
+});
+
+test('cancelling an in-flight scan aborts its request', async t => {
+    let aborted = false;
+    const app = await setup(t, request => new Promise((resolve, reject) => {
+        request.signal.addEventListener('abort', () => { aborted = true; reject(request.signal.reason); });
+    }));
+    app.document.getElementById('scan-button').click();
+    app.document.getElementById('cancel-scan-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Scan Cancelled');
+    assert.equal(aborted, true);
+    assert.equal(app.ownershipRequests.length, 0);
+});
+
+test('ownership lost during the configured delay is checked before the next POST', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page([
+        license(1, 'First Demo'), license(2, 'Lost Demo')
+    ])), { removalDelay: 2000 });
+    let owned = [1, 2, 999];
+    app.setOwnership(() => new Response(JSON.stringify({ rgOwnedPackages: owned })));
+    await app.scan(); app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 2000));
+    owned = [999];
+    app.advance(app.timers.find(timer => timer.active && timer.delay === 2000));
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['1']);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Packages no longer owned: 1/);
+});
+
+test('date filters reject calendar rollover dates', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Invalid Demo', '31 Feb, 2026')])));
+    app.document.getElementById('start-date-input').value = '2026-01-01';
+    await app.scan();
+    assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Scan Failed');
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cannot read the acquisition date/);
+});
+
+test('dialogs have an accessible name, trap keyboard focus and return focus on Escape', async t => {
+    const app = await setup(t, () => new Response(page([])));
+    const settings = app.document.getElementById('settings-button');
+    settings.focus(); settings.click();
+    const dialog = app.document.querySelector('[role="dialog"]');
+    assert.equal(dialog.getAttribute('aria-modal'), 'true');
+    assert.equal(app.document.getElementById(dialog.getAttribute('aria-labelledby')).textContent, 'Cleanup Settings');
+    dialog.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+    assert.equal(app.document.activeElement.id, 'keywords-textarea');
+    dialog.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+    assert.equal(app.document.activeElement.id, 'modal-close');
+    dialog.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(app.document.querySelector('[role="dialog"]'), null);
+    assert.equal(app.document.activeElement, settings);
+});
+
+for (const id of ['1e1', ' 10 ', '10.0', '00010', '4294967295']) {
+    test(`a malformed package App ID (${JSON.stringify(id)}) cannot verify a demo`, async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Ambiguous Demo'), license(2, 'Valid Demo')])), { verifiedDemosOnly: true });
+        await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo' }], [
+            { id: 1, data: { appids: { 0: id } } }, { id: 2, apps: [10] }
+        ]));
+        await app.scan();
+        assert.deepEqual(reviewIds(app), ['2']);
+    });
+}
+
+test('an incomplete application record cannot verify a demo', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Incomplete Demo'), license(2, 'Valid Demo')])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo', infoState: 1 }, { id: 20, type: 'Demo' }], [
+        { id: 1, apps: [10] }, { id: 2, apps: [20] }
+    ]));
+    await app.scan();
+    assert.deepEqual(reviewIds(app), ['2']);
+});
+
+for (const appids of [{ 1: 10 }, { 0: 10, 2: 20 }, { app: 10 }]) {
+    test('missing or invalid application-list indices cannot verify a package', async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Broken Demo'), license(2, 'Valid Demo')])), { verifiedDemosOnly: true });
+        await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo' }, { id: 20, type: 'Demo' }], [
+            { id: 1, data: { appids } }, { id: 2, apps: [10] }
+        ]));
+        await app.scan();
+        assert.deepEqual(reviewIds(app), ['2']);
+    });
+}
+
+test('folder import reads only the two metadata files at the selected folder root', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Valid Demo')])) , { verifiedDemosOnly: true });
+    const files = metadataFiles([{ id: 10, type: 'Demo' }], [{ id: 1, apps: [10] }]);
+    files[0].webkitRelativePath = 'appcache/appinfo.vdf';
+    files[1].webkitRelativePath = 'appcache/packageinfo.vdf';
+    files.push({ name: 'random.vdf', webkitRelativePath: 'appcache/random.vdf', arrayBuffer: () => { throw new Error('Must not read unrelated files'); } });
+    files.push({ name: 'appinfo.vdf', webkitRelativePath: 'appcache/backup/appinfo.vdf', arrayBuffer: () => { throw new Error('Must not read nested backups'); } });
+    const input = app.document.getElementById('steam-metadata-folder');
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new app.window.Event('change'));
+    await until(() => !app.document.getElementById('import-metadata-button').disabled);
+    assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 1 apps and 1 packages/);
+    await app.scan();
+    assert.deepEqual(reviewIds(app), ['1']);
+});
+
+for (const settings of [{ profile: 'all' }, { profile: 'custom', keywords: [] }]) {
+    test('a scan without an inclusion filter requires explicit selection', async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Any Game'), license(2, 'Any Demo')])), settings);
+        await app.scan();
+        assert.deepEqual(reviewIds(app), ['1', '2']);
+        assert.equal(app.document.querySelectorAll('.license-checkbox:checked').length, 0);
+        assert.equal(app.document.getElementById('review-proceed-button').disabled, true);
+        app.document.getElementById('select-all').click();
+        assert.equal(app.document.querySelectorAll('.license-checkbox:checked').length, 2);
+        assert.equal(app.document.getElementById('review-proceed-button').disabled, false);
+    });
+}
+
+test('a fresh installation defaults to verified demos without example exclusions', async t => {
+    const app = await setup(t, () => { throw new Error('No metadata; no requests expected'); }, null);
+    assert.equal(app.document.getElementById('cleanup-profile').value, 'demos');
+    app.document.getElementById('settings-button').click();
+    assert.equal(app.document.getElementById('exclusions-textarea').value, '');
+    assert.equal(app.document.getElementById('delay-input').value, '10');
+    closeDialog(app);
+    await app.scan();
+    assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Steam Metadata Required');
+    assert.equal(app.requests.length, 0);
+});
