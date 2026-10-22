@@ -2,7 +2,7 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.8.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.9.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
@@ -10,7 +10,9 @@
 
 This fork fixes scanning on Steam's cursor-paginated license page. Scans start from the first page, including when you open the script on a later page, and follow Steam's actual Next links. Pages with no matches do not stop the scan. A failed or incomplete scan shows an error instead of offering a partial list for removal.
 
-The script selects licenses with Steam's **Remove** link, applies your name and date filters, and lets you review the list before confirming removal. A free license can grant access to a full game or DLC, so review the selected products as well as their names.
+By default, the script verifies application types using Steam client metadata you import locally. A removable package qualifies only if **every application it grants has type `Demo`**. Names and user tags are not proof: an old package called “Stellar Stables Demo” can grant an application whose current type is `Game`.
+
+Packages containing a game, DLC, tool, or any other non-demo application are excluded. Packages with missing contents or missing application types are also excluded and counted in the scan summary. An optional name-filter mode preserves the original cleanup workflow and is explicitly marked unverified.
 
 ---
 
@@ -44,6 +46,7 @@ The script selects licenses with Steam's **Remove** link, applies your name and 
 | Feature                          | Description                                                                                                                                              |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🔒 **Removable Licenses Only**     | Selects only licenses with Steam's free-license removal link. Products without that link are skipped. |
+| 🔬 **Demo Type Verification**     | Reads local `packageinfo.vdf` to resolve package → App IDs and `appinfo.vdf` to check each app's `common.type`. Only packages containing demos exclusively qualify. |
 | 📅 **Date Range Filtering**        | Target licenses acquired within a specific timeframe. Perfect for cleaning up items from a specific year or event.                                       |
 | 🔎 **Comprehensive Scanning**      | Automatically scans **all pages** of your licenses, finding every match based on your keywords and selected date range.                                  |
 | ✅ **Interactive Review**     | After scanning, you are presented with a detailed list of matches. **Nothing is removed without your final approval.**                      |
@@ -67,7 +70,26 @@ If you already installed the original script, this version keeps its name and na
 
 ### Remove demos only
 
-In **Settings**, set **Inclusion Keywords** to `demo`, leave the date fields empty, save, and scan. This matches the word in license names; demos without that word need separate selection. Keywords and exclusions are literal text, including punctuation such as `(Soundtrack)`.
+1. Restart the Steam client while online so it can refresh its local metadata.
+2. Leave **Only verified demos (Steam metadata)** checked. It is enabled by default, including when upgrading from 1.8.
+3. Click **Import Steam metadata** and select **both** `appinfo.vdf` and `packageinfo.vdf` from the client's `appcache` folder.
+4. Leave the date fields empty to scan all acquisition dates, then click **Scan for Removable Licenses**.
+5. Review the verified packages and the counts of skipped non-demo or unverifiable packages before confirming removal.
+
+Typical cache folders:
+
+| Installation | Folder |
+| --- | --- |
+| Linux, native Steam | `~/.local/share/Steam/appcache/` (also commonly `~/.steam/steam/appcache/`) |
+| Linux, Flatpak | `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/appcache/` |
+| Windows | `C:\Program Files (x86)\Steam\appcache\` |
+| macOS | `~/Library/Application Support/Steam/appcache/` |
+
+The selected files are parsed **in this browser tab**. They are not uploaded, modified, or stored in localStorage; unused fields such as PICS tokens are discarded. Import them again after refreshing the page. Supported cache formats are appinfo versions 39–41 and packageinfo versions 39–40.
+
+Verification reflects the **imported cache**, not a live Steam server lookup. Old or incomplete caches can be stale or omit products. The script never treats missing metadata as a demo and does not fall back to the package name. Public store APIs were checked for the reported package IDs, but they do not expose contents for several hidden/free demo packages, so those APIs cannot provide complete verification here.
+
+In verified mode, **inclusion keywords are ignored** so a genuine Demo-type app does not need “demo” in its name. Exclusions still protect both package names and application names; date filters still apply. Uncheck **Only verified demos** to use the original literal name filters instead. For example, inclusion `demo` then matches a word in the license name, with no application-type verification.
 
 The existing default delay is **600000 ms (10 minutes)** between removals. For hundreds of demos you can set a shorter delay, for example **2000 ms**. Steam can still rate limit requests; the script waits and retries rather than assuming that an error means a license was removed.
 
@@ -77,7 +99,7 @@ The existing default delay is **600000 ms (10 minutes)** between removals. For h
 
 1.  Navigate to your [**Steam Account Licenses Page**](https://store.steampowered.com/account/licenses/).
 2.  **(Optional)** Select a **Start Date** and/or **End Date** to limit the scan to a specific period.
-3.  **(Optional)** Click `⚙️ Settings` to customize your **Inclusion** keywords (e.g., `demo, beta`), **Exclusion** keywords, and the new **Removal Delay**.
+3.  Import both Steam cache files for verified demo mode. **(Optional)** Click `Settings` to customize **Exclusion** keywords and the **Removal Delay**. Inclusion keywords only apply with verified demo mode disabled.
 4.  Click the `🔎 Scan for Removable Licenses` button to begin.
 5.  Once the scan is complete, the **Interactive Review** modal will appear.
 6.  **Review the list carefully.** Uncheck any licenses you want to keep.
@@ -92,7 +114,7 @@ The existing default delay is **600000 ms (10 minutes)** between removals. For h
 <details>
 <summary><strong>Can this script remove my paid games or DLC?</strong></summary>
 <br>
-The script only selects licenses that expose Steam's <strong>Remove</strong> link for free-license removal. It does not use the paid-purchase removal workflow. Some free licenses grant full games or DLC, so check the review list before confirming.
+The script only selects licenses that expose Steam's <strong>Remove</strong> link for free-license removal. It does not use the paid-purchase removal workflow. Verified mode additionally excludes any package containing a non-demo application according to the imported cache. Name-filter mode provides no such type check. Review the list before confirming.
 </details>
 
 <details>
@@ -104,13 +126,13 @@ Yes. This script uses Steam's own license removal function. Once a free license 
 <details>
 <summary><strong>Can I remove all license within a date range?</strong></summary>
 <br>
-Yes. If inclusion keywords are empty, the scan selects all removable licenses within the optional date range except those matching exclusions. Clear exclusions too if you want no name filtering.
+In name-filter mode, empty inclusion keywords select all removable licenses within the optional date range except those matching exclusions. In verified demo mode, only packages verified as demos qualify regardless of inclusion keywords.
 </details>
 
 <details>
 <summary><strong>How does the script identify licenses to remove?</strong></summary>
 <br>
-The script scans license names for your <strong>inclusion keywords</strong> (e.g., "demo", "beta") that were acquired within the optional <strong>date range</strong> you've set. If a name also contains one of your <strong>exclusion keywords</strong>, it will be ignored, giving you fine-grained control. If you leave all keyword fields empty, it will select *all* removable licenses within the date range.
+Verified mode resolves the package's full App ID list from the imported <code>packageinfo.vdf</code> and requires every app's <code>common.type</code> in <code>appinfo.vdf</code> to equal <code>Demo</code>, case-insensitively. It skips mixed packages and missing metadata. Name-filter mode uses literal words and phrases in license names instead. Both modes honor exclusions and the optional date range.
 </details>
 
 <details>
@@ -150,7 +172,9 @@ npm run check
 npm test
 ```
 
-Tests run the userscript in jsdom against simulated Steam license pages and responses. They cover cursor pagination, pages without matches, duplicate packages, name/date filters, failed scans, review and confirmation, Steam errors, rate limits, and cancellation. They do not sign in to Steam or remove real licenses.
+Tests run the userscript in jsdom against simulated Steam license pages, responses, and binary cache files. They cover cursor pagination, pages without matches, duplicate packages, name/date filters, failed scans, review and confirmation, Steam errors, rate limits, cancellation, supported cache versions, invalid imports, mixed packages, missing types, and the “Stellar Stables Demo”/Game counterexample. They do not sign in to Steam or remove real licenses.
+
+Cache format references: [xPaw/SteamAppInfo](https://github.com/xPaw/SteamAppInfo), [ValvePython/steam appcache reader](https://github.com/ValvePython/steam/blob/master/steam/utils/appcache.py), and [ValvePython/vdf](https://github.com/ValvePython/vdf). The reader was also smoke-tested against the public binary fixtures in [mexus/steam-vdf-parser](https://github.com/mexus/steam-vdf-parser/tree/master/tests/fixtures).
 
 ### ❤️ Credits
 -   Original script: [PatrickJnr/Steam-License-Cleanup](https://github.com/PatrickJnr/Steam-License-Cleanup)

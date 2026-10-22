@@ -36,8 +36,9 @@ async function setup(t, handler, settings = {}) {
     const requests = [];
     const timers = [];
     window.g_sessionID = 'test-session';
+    window.TextDecoder = TextDecoder;
     window.localStorage.setItem('steamLicenseCleanupSettings', JSON.stringify({
-        keywords: ['demo'], exclusions: [], removalDelay: 0, ...settings
+        verifiedDemosOnly: false, keywords: ['demo'], exclusions: [], removalDelay: 0, ...settings
     }));
     window.fetch = async (url, options = {}) => {
         const request = { url: new URL(url, origin), ...options };
@@ -69,6 +70,60 @@ async function setup(t, handler, settings = {}) {
         },
         advance: timer => { timer.active = false; timer.callback(); }
     };
+}
+
+const u32 = value => { const buffer = Buffer.alloc(4); buffer.writeUInt32LE(value); return buffer; };
+const cstring = value => Buffer.from(`${value}\0`);
+const arrayBuffer = buffer => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+function kv(object, pool = null) {
+    const parts = [];
+    for (const [key, value] of Object.entries(object)) {
+        const keyBytes = pool ? u32(pool.indexOf(key)) : cstring(key);
+        if (typeof value === 'object') parts.push(Buffer.from([0]), keyBytes, kv(value, pool));
+        else if (typeof value === 'number') parts.push(Buffer.from([2]), keyBytes, u32(value));
+        else parts.push(Buffer.from([1]), keyBytes, cstring(value));
+    }
+    return Buffer.concat([...parts, Buffer.from([8])]);
+}
+function metadataFiles(apps, packages, appVersion = 41, packageVersion = 40) {
+    const appData = apps.map(app => ({ appinfo: {
+        appid: app.id,
+        common: { name: app.name || `App ${app.id}`, ...(app.type === undefined ? {} : { type: app.type }) }
+    } }));
+    const pool = [];
+    const collect = object => Object.entries(object).forEach(([key, value]) => {
+        if (!pool.includes(key)) pool.push(key);
+        if (typeof value === 'object') collect(value);
+    });
+    appData.forEach(collect);
+    const entries = appData.map((data, i) => {
+        const fields = Buffer.alloc(appVersion >= 40 ? 60 : 40);
+        fields.writeUInt32LE(2, 0);
+        fields.writeUInt32LE(1792699200, 4);
+        const payload = kv(data, appVersion === 41 ? pool : null);
+        return Buffer.concat([u32(apps[i].id), u32(fields.length + payload.length), fields, payload]);
+    });
+    const appHeader = Buffer.concat([u32(0x07564400 + appVersion), u32(1), ...(appVersion === 41 ? [Buffer.alloc(8)] : [])]);
+    const body = Buffer.concat([...entries, u32(0)]);
+    if (appVersion === 41) appHeader.writeBigUInt64LE(BigInt(appHeader.length + body.length), 8);
+    const appBuffer = Buffer.concat([appHeader, body, ...(appVersion === 41 ? [u32(pool.length), ...pool.map(cstring)] : [])]);
+    const packageBuffer = Buffer.concat([
+        u32(0x06565500 + packageVersion), u32(1),
+        ...packages.map(pkg => Buffer.concat([
+            u32(pkg.id), Buffer.alloc(packageVersion >= 40 ? 32 : 24),
+            kv({ [String(pkg.id)]: { packageid: pkg.id, appids: Object.fromEntries(pkg.apps.map((id, i) => [String(i), id])) } })
+        ])), u32(0xffffffff)
+    ]);
+    return [
+        { name: 'appinfo.vdf', lastModified: Date.now(), arrayBuffer: async () => arrayBuffer(appBuffer) },
+        { name: 'packageinfo.vdf', lastModified: Date.now(), arrayBuffer: async () => arrayBuffer(packageBuffer) }
+    ];
+}
+async function importMetadata(app, files) {
+    const input = app.document.getElementById('steam-metadata-files');
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new app.window.Event('change'));
+    await until(() => !app.document.getElementById('import-metadata-button').disabled);
 }
 
 test('scans from the first page through cursor links and an empty-match page, deduplicating demos', async t => {
@@ -275,3 +330,91 @@ test('Cancel aborts an in-flight request and prevents later removals', async t =
     assert.equal(app.requests.find(request => request.method).signal.aborted, true);
     assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup cancelled.*Successfully removed 0/s);
 });
+
+test('verified mode requires imported metadata and sends no request without it', async t => {
+    const app = await setup(t, () => { throw new Error('Unexpected network request'); }, { verifiedDemosOnly: true });
+    await app.scan();
+    assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Steam Metadata Required');
+    assert.equal(app.requests.length, 0);
+});
+
+for (const [appVersion, packageVersion] of [[39, 39], [40, 40], [41, 40]]) {
+    test(`cache v${appVersion}/v${packageVersion}: verifies types, not names, and rejects mixed or unknown packages`, async t => {
+        const app = await setup(t, () => new Response(page([
+            license(1163997, 'Stellar Stables Demo'), license(2, 'Unusual Trial'),
+            license(3, 'Mixed Demo'), license(4, 'Unknown Demo'), license(5, 'Missing Type Demo'),
+            license(6, 'Tool Demo'), license(7, 'Several Demos'), license(8, 'Empty Demo')
+        ])), { verifiedDemosOnly: true, keywords: ['this-never-matches'] });
+        await importMetadata(app, metadataFiles([
+            { id: 3286080, name: 'Stellar Stables', type: 'Game' },
+            { id: 20, name: 'A trial with no keyword', type: 'Demo' },
+            { id: 21, type: 'demo' }, { id: 30 }, { id: 40, type: 'Tool' }
+        ], [
+            { id: 1163997, apps: [3286080] }, { id: 2, apps: [20] },
+            { id: 3, apps: [20, 3286080] }, { id: 5, apps: [30] },
+            { id: 6, apps: [40] }, { id: 7, apps: [20, 21] }, { id: 8, apps: [] }
+        ], appVersion, packageVersion));
+        assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 5 apps and 7 packages/);
+        assert.equal(app.requests.length, 0, 'cache import stays local');
+        await app.scan();
+        assert.equal(app.document.querySelectorAll('.license-checkbox').length, 2);
+        const review = app.document.querySelector('#review-list').textContent;
+        assert.match(review, /Unusual Trial.*20 = Demo/s);
+        assert.match(review, /20 = Demo, 21 = Demo/);
+        assert.doesNotMatch(review, /Stellar Stables|Mixed Demo|Unknown Demo|Missing Type|Tool Demo|Empty Demo/);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 3 packages containing non-demo apps and 3 packages with missing metadata/);
+    });
+}
+
+test('metadata mode still protects exclusions and checks types again before removal', async t => {
+    const app = await setup(t, request => request.method
+        ? new Response('{"success":1}') : new Response(page([license(1, 'Trial'), license(2, 'Another Trial')])),
+    { verifiedDemosOnly: true, exclusions: ['keep'] });
+    await importMetadata(app, metadataFiles([
+        { id: 10, name: 'Keep this one', type: 'Demo' }, { id: 20, type: 'Demo' }
+    ], [{ id: 1, apps: [10] }, { id: 2, apps: [20] }]));
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    const posts = app.requests.filter(request => request.method);
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].body.get('packageid'), '2');
+});
+
+test('Slime Scramble: Demo App ID qualifies, Game App ID and a mixed license do not', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'Slime Scramble Demo'),
+        license(2, 'Slime Scramble Demo - old package name'),
+        license(3, 'Slime Scramble Demo and full game')
+    ])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([
+        { id: 3249220, name: 'Slime Scramble Demo', type: 'Demo' },
+        { id: 3022510, name: 'Slime Scramble', type: 'Game' }
+    ], [{ id: 1, apps: [3249220] }, { id: 2, apps: [3022510] }, { id: 3, apps: [3249220, 3022510] }]));
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    const review = app.document.querySelector('#review-list').textContent;
+    assert.match(review, /3249220 = Demo/);
+    assert.doesNotMatch(review, /3022510|old package|full game/);
+});
+
+for (const kind of ['missing-file', 'truncated', 'unsupported-version', 'invalid-string-index']) {
+    test(`invalid cache import (${kind}) cannot enable verified scanning`, async t => {
+        const app = await setup(t, () => { throw new Error('Unexpected request'); }, { verifiedDemosOnly: true });
+        let files = metadataFiles([{ id: 10, type: 'Demo' }], [{ id: 1, apps: [10] }]);
+        if (kind === 'missing-file') files.pop();
+        else {
+            let buffer = Buffer.from(await files[0].arrayBuffer());
+            if (kind === 'truncated') buffer = buffer.subarray(0, 20);
+            if (kind === 'unsupported-version') buffer.writeUInt32LE(0x07564430, 0);
+            if (kind === 'invalid-string-index') buffer.writeUInt32LE(0xffffffff, 16 + 8 + 60 + 1);
+            files[0].arrayBuffer = async () => arrayBuffer(buffer);
+        }
+        await importMetadata(app, files);
+        assert.match(app.document.getElementById('metadata-status').textContent, /Metadata not loaded:/);
+        await app.scan();
+        assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Steam Metadata Required');
+        assert.equal(app.requests.length, 0);
+    });
+}
