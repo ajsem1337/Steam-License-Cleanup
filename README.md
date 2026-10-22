@@ -2,7 +2,7 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.10.2-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.10.3-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
@@ -100,7 +100,7 @@ Verification reflects the **imported cache**, not a live Steam server lookup. Ol
 
 In verified mode, **inclusion keywords are ignored** so a genuine Demo-type app does not need “demo” in its name. Exclusions still protect both package names and application names; date filters still apply. Uncheck **Only verified demos** to use the original literal name filters instead. For example, inclusion `demo` then matches a word in the license name, with no application-type verification.
 
-The existing default delay is **600000 ms (10 minutes)** between removals. Saved custom delays are preserved. Short intervals can encounter Steam rate limits. After a removal is rate limited, the script uses at least **60000 ms (60 seconds)** between subsequent removals in this tab, or your configured delay if longer. These are pacing choices, not a guarantee that Steam's limit has reset.
+The existing default delay is **600000 ms (10 minutes)** between removals. Saved custom delays are preserved. Short intervals can encounter Steam rate limits. The script then pauses automatically without discarding the selected queue. Configured spacing between successful requests is unchanged; cooldowns do not guarantee that Steam's limit has reset.
 
 ---
 
@@ -153,7 +153,7 @@ To prevent your account from being temporarily locked out of making changes, the
 <details>
 <summary><strong>What happens if I encounter a rate limit?</strong></summary>
 <br>
-For removal requests, HTTP 429 and Steam result 84 pause the queue and retry the same package after 10, 20, then 40 minutes. Longer <code>Retry-After</code> values are respected (up to the browser timer range). Keep the tab open; Cancel interrupts the pause. After four unsuccessful attempts, the summary offers <strong>Resume Remaining</strong>. It keeps only the unprocessed selected packages in this tab, rechecks current ownership and required demo metadata, and preserves the confirmed removal count without resubmitting completed packages. Refreshing or closing the page discards that queue. There is no known guaranteed reset time; wait longer before manually resuming. Read-only scan/ownership requests retain their shorter bounded retries. Only Steam success result 1 is counted as a confirmed removal.
+For removal requests, HTTP 429 and Steam result 84 pause the queue for 3 minutes, increasing to 6, 12, 24, then at most 30 minutes after consecutive limits on the same package. Longer <code>Retry-After</code> values are respected (up to the browser timer range). The status shows the next retry time. The same package stays queued until it succeeds, is no longer owned, another error occurs, or you cancel. There is no four-attempt cutoff for removal rate limits. Ownership is refreshed after each pause before retrying; already processed packages are not submitted again. Keep the tab open: closing or refreshing discards the in-memory queue. Cancel interrupts the pause immediately. These intervals are retry policy, not a known reset time for Steam's removal limit. Read-only scan/ownership requests retain their shorter bounded retries and can stop the operation if they fail. Only Steam success result 1 is counted as a confirmed removal.
 
 Steam result <strong>29 (DuplicateRequest)</strong> triggers another uncached ownership check. If Steam no longer lists that SubID, the entry is recorded separately and the queue continues. If Steam still lists it as owned, the queue stops with an explicit inconsistency message instead of issuing hundreds of ineffective requests. Skipped duplicates appear separately in the summary and exported report; they are not counted as newly confirmed removals. This check cannot distinguish delayed ownership updates from an ineffective removal, so contradictory data stops the queue. Other HTTP, network, or Steam errors also stop the cleanup; rescan before trying again.
 
