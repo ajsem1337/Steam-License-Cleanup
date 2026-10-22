@@ -524,7 +524,7 @@ for (const limit of ['http', 'steam']) {
         app.remove();
         await until(() => app.timers.some(timer => timer.active && timer.delay >= 30000));
         const timer = app.timers.find(timer => timer.active && timer.delay >= 30000);
-        assert.equal(timer.delay, limit === 'http' ? 90000 : 30000);
+        assert.equal(timer.delay, 600000);
         assert.equal(posts, 1);
         app.advance(timer);
         await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
@@ -545,6 +545,63 @@ test('repeated rate limiting stops after four attempts', async t => {
     await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
     assert.equal(app.requests.filter(request => request.method).length, 4);
     assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup stopped.*Successfully removed 0/s);
+    assert.ok(app.document.getElementById('resume-cleanup-button'));
+    assert.deepEqual(app.timers.filter(timer => timer.delay >= 600000).map(timer => timer.delay), [600000, 1200000, 2400000]);
+});
+
+test('removal retries respect a Retry-After longer than the default cooldown', async t => {
+    let posts = 0;
+    const app = await setup(t, request => !request.method ? new Response(page([license(1, 'Game Demo')]))
+        : posts++ === 0 ? new Response('', { status: 429, headers: { 'Retry-After': '3600' } })
+        : new Response('{"success":1}'));
+    await app.scan();
+    app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 3600000));
+    assert.equal(posts, 1);
+    app.advance(app.timers.find(timer => timer.active && timer.delay === 3600000));
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(posts, 2);
+});
+
+test('resume retains confirmed removals, refreshes ownership, and slows the remaining queue', async t => {
+    let limited = true;
+    const app = await setup(t, request => !request.method ? new Response(page([
+        license(1, 'First Demo'), license(2, 'Limited Demo'), license(3, 'Lost Demo'), license(4, 'Last Demo')
+    ])) : new Response(request.body.get('packageid') === '2' && limited ? '{"success":84}' : '{"success":1}'));
+    await app.scan();
+    app.remove();
+    for (const delay of [600000, 1200000, 2400000]) {
+        await until(() => app.timers.some(timer => timer.active && timer.delay === delay));
+        app.advance(app.timers.find(timer => timer.active && timer.delay === delay));
+    }
+    await until(() => app.document.getElementById('resume-cleanup-button'));
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1 license/);
+    assert.equal(app.document.getElementById('resume-cleanup-button').textContent, 'Resume Remaining (3)');
+    limited = false;
+    app.setOwnership(() => new Response('{"rgOwnedPackages":[2,4,999]}'));
+    app.document.getElementById('resume-cleanup-button').click();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 60000));
+    app.advance(app.timers.find(timer => timer.active && timer.delay === 60000));
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['1', '2', '2', '2', '2', '2', '4']);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 3 license/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Packages no longer owned: 1/);
+    assert.equal(app.document.getElementById('resume-cleanup-button'), null);
+});
+
+test('Cancel interrupts a long rate limit pause without another removal request', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":84}')
+        : new Response(page([license(1, 'Limited Demo')])));
+    await app.scan();
+    app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 600000));
+    const cooldown = app.timers.find(timer => timer.active && timer.delay === 600000);
+    app.document.getElementById('cancel-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(cooldown.active, false);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup cancelled/);
+    assert.equal(app.document.getElementById('resume-cleanup-button'), null);
 });
 
 test('Cancel interrupts a cooldown without sending the next removal', async t => {

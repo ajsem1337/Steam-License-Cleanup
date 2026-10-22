@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Cleanup
 // @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
-// @version      1.10.1
+// @version      1.10.2
 // @description  Verifies demo licenses using Steam client metadata, scans all license pages, and allows review before removal. Includes optional name filters, progress, rate-limit handling, and cancellation.
 // @author       PatrickJnr (Enhanced by Gemini)
 // @match        https://store.steampowered.com/account/licenses*
@@ -34,6 +34,8 @@
         scanStats: null,
         cleanupController: null,
         cleanupStatus: "",
+        resumeQueue: [],
+        throttledDelay: 0,
         removedDetails: [],
         skippedDetails: [],
         notOwnedDetails: [],
@@ -454,11 +456,11 @@
         signal?.addEventListener('abort', abort, { once: true });
     });
 
-    const retryDelay = (response, attempt) => {
+    const retryDelay = (response, attempt, minimum = 30000, maximum = 300000) => {
         const header = response.headers.get('Retry-After');
         const seconds = header === null ? NaN : Number(header);
         const requested = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
-        return Math.min(300000, Math.max(30000 * 2 ** attempt, requested || 0));
+        return Math.min(maximum, Math.max(minimum * 2 ** attempt, requested || 0));
     };
 
     const fetchOwnedPackages = async (signal) => {
@@ -592,6 +594,7 @@
             return;
         }
         state.isScanning = true;
+        state.resumeQueue = [];
         state.scannedLicenses = [];
         state.ownedPackages = null;
         state.scanStats = { demo: new Set(), other: new Set(), unknown: new Set(), seen: new Set(), notOwned: new Set() };
@@ -726,9 +729,15 @@
                         }
                     }
                     if (!rateLimited) break;
-                    if (attempt === 3) throw new Error('Steam is still rate limiting removals. Try again later.');
-                    const delay = retryDelay(response, attempt);
-                    updateProgressBar(progressBar, statusText, progress, `Rate limited. Retrying in ${delay / 1000}s...`, 'var(--steam-warning)');
+                    state.throttledDelay = Math.max(state.throttledDelay, 60000);
+                    if (attempt === 3) {
+                        state.resumeQueue = licensesToRemove.slice(i);
+                        throw new Error('Steam is still rate limiting removals. The remaining selected queue is kept in this tab. Wait longer, then use Resume Remaining.');
+                    }
+                    // Removal limits can outlast the shorter retries used for reads.
+                    // Respect longer Retry-After values rather than shortening them.
+                    const delay = retryDelay(response, attempt, 600000, 2147483647);
+                    updateProgressBar(progressBar, statusText, progress, `Rate limited. Cleanup paused; retrying the same package in ${Math.ceil(delay / 60000)} minute(s). Keep this tab open, or Cancel to stop.`, 'var(--steam-warning)');
                     await wait(delay, signal);
                 }
 
@@ -749,9 +758,10 @@
                 }
                 const completedProgress = ((i + 1) / licensesToRemove.length) * 100;
                 if (i + 1 < licensesToRemove.length) {
-                    const message = `Processed ${i + 1} of ${licensesToRemove.length}: ${state.removedDetails.length} removed, ${state.skippedDetails.length + state.notOwnedDetails.length} skipped. Waiting ${state.settings.removalDelay / 1000}s...`;
+                    const delay = Math.max(state.settings.removalDelay, state.throttledDelay);
+                    const message = `Processed ${i + 1} of ${licensesToRemove.length}: ${state.removedDetails.length} removed, ${state.skippedDetails.length + state.notOwnedDetails.length} skipped. Waiting ${delay / 1000}s...`;
                     updateProgressBar(progressBar, statusText, completedProgress, message);
-                    await wait(state.settings.removalDelay, signal);
+                    await wait(delay, signal);
                 } else {
                     updateProgressBar(progressBar, statusText, completedProgress, 'Cleanup complete.');
                 }
@@ -761,7 +771,7 @@
                 state.cleanupStatus = 'Cleanup cancelled. A request already sent to Steam may still finish; rescan before retrying.';
             } else {
                 console.error('License cleanup stopped:', error);
-                state.cleanupStatus = `Cleanup stopped: ${error.message} Rescan before retrying.`;
+                state.cleanupStatus = `Cleanup stopped: ${error.message}${state.resumeQueue.length ? '' : ' Rescan before retrying.'}`;
             }
         } finally {
             state.isCleaning = false;
@@ -770,9 +780,9 @@
         }
     };
 
-    const startCleanup = (licensesToRemove) => {
+    const startCleanup = (licensesToRemove, resuming = false) => {
         if (state.isCleaning || state.isScanning || state.isImporting || licensesToRemove.length === 0) return;
-        if (state.settings.verifiedDemosOnly && licensesToRemove.some(license => verifyDemoPackage(license.packageId).status !== 'demo')) {
+        if (licensesToRemove.some(license => (state.settings.verifiedDemosOnly || license.verifiedDemo) && verifyDemoPackage(license.packageId).status !== 'demo')) {
             showInfoModal('Verification Failed', 'A selected package could not be verified as demos only. Import current Steam metadata and scan again.');
             return;
         }
@@ -791,9 +801,12 @@
         state.isCleaning = true;
         state.cleanupController = new AbortController();
         state.cleanupStatus = 'Cleanup complete.';
-        state.removedDetails = []; // Reset for this run
-        state.skippedDetails = [];
-        state.notOwnedDetails = [];
+        state.resumeQueue = [];
+        if (!resuming) {
+            state.removedDetails = [];
+            state.skippedDetails = [];
+            state.notOwnedDetails = [];
+        }
         removeNextPackage(licensesToRemove, 0, progressBar, statusText);
     };
 
@@ -1010,6 +1023,17 @@
             onClick: () => window.location.reload()
         }];
         const modal = showModal("Cleanup Summary", content, buttons);
+        if (state.resumeQueue.length > 0) {
+            const pending = [...state.resumeQueue];
+            const resume = createButton('resume-cleanup-button', `Resume Remaining (${pending.length})`, 'Recheck ownership and resume only the remaining selected packages', () => {
+                modal.remove();
+                startCleanup(pending, true);
+            });
+            modal.querySelector('.modal-footer').prepend(resume);
+            const notice = document.createElement('p');
+            notice.textContent = `${pending.length} selected package(s) remain. Resume rechecks current ownership and demo metadata. Confirmed removals will not be submitted again. Keep this tab open: the queue is not saved across refreshes. After a rate limit, removals are spaced at least 60 seconds apart, or longer if configured. Steam may still require more time.`;
+            modal.querySelector('.modal-body').append(notice);
+        }
         if (state.removedDetails.length === 0 && state.skippedDetails.length === 0 && state.notOwnedDetails.length === 0) {
             modal.querySelector('#export-button').style.display = 'none';
         }
