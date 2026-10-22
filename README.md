@@ -2,13 +2,15 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.7-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.8.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
 > The ultimate tool for managing your Steam account licenses. This script transforms the default licenses page into a powerful management utility, allowing you to safely clean up unwanted items like demos, betas, and old trailers.
 
-It provides a safe, interactive workflow: it scans your entire library based on your criteria, presents a list of matches to review, and **cannot remove paid games or DLC**. Your purchases are always safe.
+This fork fixes scanning on Steam's cursor-paginated license page. Scans start from the first page, including when you open the script on a later page, and follow Steam's actual Next links. Pages with no matches do not stop the scan. A failed or incomplete scan shows an error instead of offering a partial list for removal.
+
+The script selects licenses with Steam's **Remove** link, applies your name and date filters, and lets you review the list before confirming removal. A free license can grant access to a full game or DLC, so review the selected products as well as their names.
 
 ---
 
@@ -41,7 +43,7 @@ It provides a safe, interactive workflow: it scans your entire library based on 
 
 | Feature                          | Description                                                                                                                                              |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🔒 **Safe By Design**              | **Cannot remove paid games or DLC.** The script can only interact with Steam's function for removing *free* licenses, so your purchased library is always safe. |
+| 🔒 **Removable Licenses Only**     | Selects only licenses with Steam's free-license removal link. Products without that link are skipped. |
 | 📅 **Date Range Filtering**        | Target licenses acquired within a specific timeframe. Perfect for cleaning up items from a specific year or event.                                       |
 | 🔎 **Comprehensive Scanning**      | Automatically scans **all pages** of your licenses, finding every match based on your keywords and selected date range.                                  |
 | ✅ **Interactive Review**     | After scanning, you are presented with a detailed list of matches. **Nothing is removed without your final approval.**                      |
@@ -58,8 +60,16 @@ It provides a safe, interactive workflow: it scans your entire library based on 
 ## 🚀 Installation
 
 1.  **Install a Userscript Manager:** You need a browser extension to manage userscripts. [**Tampermonkey**](https://www.tampermonkey.net/) is highly recommended.
-2.  **Install the Script:** **[Click this link to install](https://github.com/PatrickJnr/Steam-License-Cleanup/raw/main/Steam-License-Cleanup.user.js)**.
+2.  **Install the Script:** **[Click this link to install](https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/main/Steam-License-Cleanup.user.js)**.
 3.  **Confirm Installation:** Your userscript manager will open a new tab and prompt you to install the script. Click `Install`.
+
+If you already installed the original script, this version keeps its name and namespace so your userscript manager can update it. Ensure only one copy is enabled. Updates for this fork are downloaded from `ajsem1337/Steam-License-Cleanup`; existing local settings are preserved.
+
+### Remove demos only
+
+In **Settings**, set **Inclusion Keywords** to `demo`, leave the date fields empty, save, and scan. This matches the word in license names; demos without that word need separate selection. Keywords and exclusions are literal text, including punctuation such as `(Soundtrack)`.
+
+The existing default delay is **600000 ms (10 minutes)** between removals. For hundreds of demos you can set a shorter delay, for example **2000 ms**. Steam can still rate limit requests; the script waits and retries rather than assuming that an error means a license was removed.
 
 ---
 
@@ -82,7 +92,7 @@ It provides a safe, interactive workflow: it scans your entire library based on 
 <details>
 <summary><strong>Can this script remove my paid games or DLC?</strong></summary>
 <br>
-No. Absolutely not. The script is specifically designed to only find and use Steam's function for removing <i>free</i> licenses (like demos, betas, and free weekends). It is fundamentally incapable of interacting with licenses that have a purchase record. Your paid library is completely safe.
+The script only selects licenses that expose Steam's <strong>Remove</strong> link for free-license removal. It does not use the paid-purchase removal workflow. Some free licenses grant full games or DLC, so check the review list before confirming.
 </details>
 
 <details>
@@ -94,7 +104,7 @@ Yes. This script uses Steam's own license removal function. Once a free license 
 <details>
 <summary><strong>Can I remove all license within a date range?</strong></summary>
 <br>
-Yes. If you remove all of the inclusion and exclusion keywords from the list, it will assume you want to remove all licenses that are capable of doing so. If a date range is selected, it will only remove all licenses within that date range.
+Yes. If inclusion keywords are empty, the scan selects all removable licenses within the optional date range except those matching exclusions. Clear exclusions too if you want no name filtering.
 </details>
 
 <details>
@@ -112,7 +122,9 @@ To prevent your account from being temporarily locked out of making changes, the
 <details>
 <summary><strong>What happens if I encounter a rate limit?</strong></summary>
 <br>
-Even with the configurable delay, if you are removing a large number of licenses, Steam's server may temporarily block further requests. The script will detect this, display a "Rate limited" status, wait for 30 seconds, and then automatically continue where it left off.
+The script handles both HTTP 429 and Steam result 84, waiting at least 30 seconds and increasing the delay on repeated limits. A longer <code>Retry-After</code> value is respected up to five minutes. After four unsuccessful attempts it stops and reports the error. Only Steam success result 1 is counted as a confirmed removal. Other HTTP, network, or Steam errors stop the cleanup; rescan before trying again.
+
+<p><strong>Cancel</strong> interrupts the current wait or pending browser request. A request already received by Steam may still finish, so rescan before restarting. The summary counts only confirmed removals.</p>
 </details>
 
 <details>
@@ -126,10 +138,24 @@ Yes. The script is open-source and runs entirely within your browser. It does no
 ### 💡 Troubleshooting & Contributing
 
 -   **Troubleshooting:** If the script isn't working, first ensure you are fully logged into `store.steampowered.com`. If problems persist, open your browser's developer console (F12) to check for errors.
--   **Contributing:** Suggestions and contributions are welcome! Please feel free to open an issue or submit a pull request on the [**GitHub repository**](https://github.com/PatrickJnr/Steam-License-Cleanup).
+-   **Contributing:** Suggestions and contributions are welcome! Please feel free to submit a pull request on the [**fork repository**](https://github.com/ajsem1337/Steam-License-Cleanup).
+
+### Development checks
+
+Use Node.js 26 or later (jsdom also supports Node.js 22.22.2+ and 24.15.0+):
+
+```sh
+npm ci
+npm run check
+npm test
+```
+
+Tests run the userscript in jsdom against simulated Steam license pages and responses. They cover cursor pagination, pages without matches, duplicate packages, name/date filters, failed scans, review and confirmation, Steam errors, rate limits, and cancellation. They do not sign in to Steam or remove real licenses.
 
 ### ❤️ Credits
+-   Original script: [PatrickJnr/Steam-License-Cleanup](https://github.com/PatrickJnr/Steam-License-Cleanup)
 -   @retvil
 -   @TCNOco
 -   @RavenStryker
 -   @KAURkulaator
+

@@ -1,0 +1,277 @@
+const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
+const { test } = require('node:test');
+const { JSDOM } = require('jsdom');
+
+const source = readFileSync(require.resolve('../Steam-License-Cleanup.user.js'), 'utf8');
+const origin = 'https://store.steampowered.com';
+const escape = text => String(text).replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[char]));
+const license = (id, name, date = '22 Oct, 2026', removable = true) => `
+    <tr><td>${escape(date)}</td><td>
+    ${removable ? `<div class="free_license_remove_link"><a href="javascript:RemoveFreeLicense( ${id}, 'bmFtZQ==' );">Remove</a></div>` : ''}
+    ${escape(name)} <a href="https://steamdb.info/sub/${id}/">SteamDB</a>
+    </td><td>Complimentary</td></tr>`;
+const page = (rows, next = null) => `<div class="page_content_ctn">
+    <table class="account_table"><tr><th>Date</th><th>Name</th><th>Method</th></tr>${rows.join('')}</table>
+    ${next ? `<a class="license_paginator_next" href="${escape(next)}">Next</a>` : ''}
+    </div>`;
+
+async function until(predicate) {
+    const deadline = Date.now() + 2000;
+    while (!predicate()) {
+        if (Date.now() > deadline) throw new Error('Timed out waiting for UI');
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+}
+
+async function setup(t, handler, settings = {}) {
+    const dom = new JSDOM(page([license(999, 'Current page Demo')]), {
+        url: `${origin}/account/licenses/?continuationToken=old:token&offset=4800`,
+        runScripts: 'outside-only'
+    });
+    t.after(() => dom.window.close());
+    const { window } = dom;
+    const requests = [];
+    const timers = [];
+    window.g_sessionID = 'test-session';
+    window.localStorage.setItem('steamLicenseCleanupSettings', JSON.stringify({
+        keywords: ['demo'], exclusions: [], removalDelay: 0, ...settings
+    }));
+    window.fetch = async (url, options = {}) => {
+        const request = { url: new URL(url, origin), ...options };
+        requests.push(request);
+        return handler(request, requests);
+    };
+    window.setTimeout = (callback, delay) => {
+        const timer = { callback, delay, active: true };
+        timers.push(timer);
+        if (delay <= 500) queueMicrotask(() => {
+            if (timer.active) { timer.active = false; callback(); }
+        });
+        return timer;
+    };
+    window.clearTimeout = timer => { timer.active = false; };
+    window.console.error = () => {}; // Expected failure cases are asserted via the UI.
+    window.eval(source);
+    await until(() => window.document.getElementById('scan-button'));
+    return {
+        window, document: window.document, requests, timers,
+        scan: async () => {
+            window.document.getElementById('scan-button').click();
+            await until(() => !window.document.querySelector('#working-status'));
+        },
+        remove: () => {
+            window.document.getElementById('review-proceed-button').click();
+            [...window.document.querySelectorAll('button')]
+                .find(button => button.textContent === 'Yes, Clean Up').click();
+        },
+        advance: timer => { timer.active = false; timer.callback(); }
+    };
+}
+
+test('scans from the first page through cursor links and an empty-match page, deduplicating demos', async t => {
+    const demoRows = Array.from({ length: 68 }, (_, i) => license(1151047 + i, `Game ${i} Demo`));
+    const pages = [
+        page([license(1, 'Full Game')], '?continuationToken=first:100&offset=100'),
+        page([...demoRows, demoRows[0]], '?continuationToken=second:200&offset=200'),
+        page([license(2, 'MINDFLUX: Dead Man Walking Demo'), license(3, 'Purchased Demo', undefined, false)])
+    ];
+    const app = await setup(t, request => {
+        assert.equal(request.method, undefined, 'scanning never removes licenses');
+        assert.equal(request.url.searchParams.get('l'), 'english');
+        return new Response(pages.shift());
+    });
+    await app.scan();
+    assert.equal(app.requests.length, 3);
+    assert.equal(app.requests[0].url.searchParams.has('offset'), false);
+    assert.equal(app.requests[1].url.searchParams.get('continuationToken'), 'first:100');
+    assert.equal(app.requests[2].url.searchParams.get('offset'), '200');
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 69);
+    assert.match(app.document.querySelector('#review-list').textContent, /MINDFLUX/);
+    assert.doesNotMatch(app.document.querySelector('#review-list').textContent, /SteamDB|Purchased Demo|Current page/);
+});
+
+test('keywords and exclusions are literal phrases with word boundaries; review escapes HTML', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'Game Demo'), license(2, 'Game Demo (Soundtrack)'),
+        license(3, 'Democracy'), license(4, 'C++ Demo'),
+        license(5, 'CC Demo'), license(6, '<img src=x onerror=alert(1)> Demo')
+    ])), { exclusions: ['(Soundtrack)'] });
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 4);
+    assert.equal(app.document.querySelector('#review-list img'), null);
+    assert.match(app.document.querySelector('#review-list').textContent, /<img src=x/);
+    app.document.getElementById('modal-close').click();
+    app.document.getElementById('settings-button').click();
+    app.document.getElementById('keywords-textarea').value = 'C++';
+    [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Save').click();
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    assert.match(app.document.querySelector('#review-list').textContent, /C\+\+ Demo/);
+});
+
+test('invalid acquisition dates do not hide demos without filters, but fail a filtered scan', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Game Demo', 'unknown')])));
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    app.document.getElementById('modal-close').click();
+    app.document.getElementById('start-date-input').value = '2026-10-01';
+    await app.scan();
+    assert.match(app.document.querySelector('.modal-content h2').textContent, /Scan Failed/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /acquisition date/);
+    assert.equal(app.document.querySelector('#review-proceed-button'), null);
+});
+
+test('date filtering includes both boundary dates in UTC', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'Start Demo', '1 Oct, 2026'), license(2, 'End Demo', '22 Oct, 2026'),
+        license(3, 'Old Demo', '30 Sep, 2026'), license(4, 'Future Demo', '23 Oct, 2026')
+    ])));
+    app.document.getElementById('start-date-input').value = '2026-10-01';
+    app.document.getElementById('end-date-input').value = '2026-10-22';
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 2);
+});
+
+for (const failure of ['http', 'missing-table', 'loop', 'external-link']) {
+    test(`scan failure (${failure}) never offers partial results for deletion`, async t => {
+        const app = await setup(t, (request, requests) => {
+            if (failure === 'external-link') return new Response(page([license(1, 'Game Demo')], 'https://example.com/account/licenses/'));
+            if (failure === 'loop') return new Response(page([license(1, 'Game Demo')], '/account/licenses/?l=english'));
+            if (requests.length === 1) return new Response(page([license(1, 'Game Demo')], '?offset=100&continuationToken=next'));
+            return failure === 'http' ? new Response('', { status: 500 }) : new Response('<form>Sign in</form>');
+        });
+        await app.scan();
+        assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Scan Failed');
+        assert.equal(app.document.querySelector('#review-proceed-button'), null);
+        assert.equal(app.document.getElementById('scan-button').disabled, false);
+        assert.ok(app.requests.every(request => !request.method));
+    });
+}
+
+test('settings accept comma/newline-separated keywords and preserve a zero delay', async t => {
+    const app = await setup(t, () => new Response(page([])));
+    app.document.getElementById('settings-button').click();
+    app.document.getElementById('keywords-textarea').value = 'demo\nplaytest, C++';
+    app.document.getElementById('delay-input').value = '0';
+    [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Save').click();
+    const saved = JSON.parse(app.window.localStorage.getItem('steamLicenseCleanupSettings'));
+    assert.deepEqual(saved.keywords, ['demo', 'playtest', 'C++']);
+    assert.equal(saved.removalDelay, 0);
+});
+
+test('a rate-limited scan retries the same cursor before offering review', async t => {
+    let gets = 0;
+    const app = await setup(t, () => ++gets === 1
+        ? new Response('', { status: 429 }) : new Response(page([license(1, 'Game Demo')])));
+    app.document.getElementById('scan-button').click();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 30000));
+    assert.equal(app.document.querySelector('#review-proceed-button'), null);
+    assert.equal(app.document.getElementById('scan-button').disabled, true);
+    app.advance(app.timers.find(timer => timer.active && timer.delay === 30000));
+    await until(() => app.document.querySelector('#review-proceed-button'));
+    assert.equal(app.requests[0].url.href, app.requests[1].url.href);
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+});
+
+test('removal requires review and confirmation and only removes selected packages', async t => {
+    const app = await setup(t, request => request.method === 'POST'
+        ? new Response('{"success":1}')
+        : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
+    await app.scan();
+    const checkbox = app.document.querySelector('.license-checkbox');
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new app.window.Event('change'));
+    app.document.getElementById('review-proceed-button').click();
+    assert.equal(app.requests.length, 1, 'review alone sends no removal request');
+    [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Yes, Clean Up').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    const removals = app.requests.filter(request => request.method === 'POST');
+    assert.equal(removals.length, 1);
+    assert.equal(removals[0].body.get('packageid'), '2');
+    assert.equal(removals[0].body.get('sessionid'), 'test-session');
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1 license/);
+});
+
+test('a nonzero Steam error is not counted as a successful removal or retried forever', async t => {
+    const app = await setup(t, request => request.method === 'POST'
+        ? new Response('{"success":2}')
+        : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
+    await app.scan();
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup stopped.*Successfully removed 0/s);
+    assert.equal(app.requests.filter(request => request.method === 'POST').length, 1);
+});
+
+for (const limit of ['http', 'steam']) {
+    test(`retries ${limit} rate limits and counts the package only after success`, async t => {
+        let posts = 0;
+        const app = await setup(t, request => {
+            if (!request.method) return new Response(page([license(1, 'Game Demo')]));
+            if (posts++ === 0) return limit === 'http'
+                ? new Response('', { status: 429, headers: { 'Retry-After': '90' } })
+                : new Response('{"success":84}');
+            return new Response('{"success":1}');
+        });
+        await app.scan();
+        app.remove();
+        await until(() => app.timers.some(timer => timer.active && timer.delay >= 30000));
+        const timer = app.timers.find(timer => timer.active && timer.delay >= 30000);
+        assert.equal(timer.delay, limit === 'http' ? 90000 : 30000);
+        assert.equal(posts, 1);
+        app.advance(timer);
+        await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+        assert.equal(posts, 2);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1 license/);
+    });
+}
+
+test('repeated rate limiting stops after four attempts', async t => {
+    const app = await setup(t, request => request.method
+        ? new Response('{"success":84}') : new Response(page([license(1, 'Game Demo')])));
+    await app.scan();
+    app.remove();
+    for (let i = 0; i < 3; i++) {
+        await until(() => app.timers.some(timer => timer.active && timer.delay >= 30000));
+        app.advance(app.timers.find(timer => timer.active && timer.delay >= 30000));
+    }
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(app.requests.filter(request => request.method).length, 4);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup stopped.*Successfully removed 0/s);
+});
+
+test('Cancel interrupts a cooldown without sending the next removal', async t => {
+    const app = await setup(t, request => request.method
+        ? new Response('{"success":1}') : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])),
+    { removalDelay: 600000 });
+    await app.scan();
+    app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 600000));
+    const cooldown = app.timers.find(timer => timer.active && timer.delay === 600000);
+    app.document.getElementById('cancel-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(cooldown.active, false);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup cancelled.*Successfully removed 1/s);
+    assert.equal(app.document.getElementById('scan-button').disabled, false);
+});
+
+test('Cancel aborts an in-flight request and prevents later removals', async t => {
+    const app = await setup(t, request => {
+        if (!request.method) return new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')]));
+        return new Promise((resolve, reject) => {
+            request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+        });
+    });
+    await app.scan();
+    app.remove();
+    await until(() => app.requests.some(request => request.method));
+    app.document.getElementById('cancel-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+    assert.equal(app.requests.find(request => request.method).signal.aborted, true);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup cancelled.*Successfully removed 0/s);
+});
