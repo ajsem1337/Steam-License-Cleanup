@@ -79,7 +79,8 @@ function kv(object, pool = null) {
     const parts = [];
     for (const [key, value] of Object.entries(object)) {
         const keyBytes = pool ? u32(pool.indexOf(key)) : cstring(key);
-        if (typeof value === 'object') parts.push(Buffer.from([0]), keyBytes, kv(value, pool));
+        if (Buffer.isBuffer(value)) parts.push(Buffer.from([5]), keyBytes, value, Buffer.alloc(2));
+        else if (typeof value === 'object') parts.push(Buffer.from([0]), keyBytes, kv(value, pool));
         else if (typeof value === 'number') parts.push(Buffer.from([2]), keyBytes, u32(value));
         else parts.push(Buffer.from([1]), keyBytes, cstring(value));
     }
@@ -93,7 +94,7 @@ function metadataFiles(apps, packages, appVersion = 41, packageVersion = 40) {
     const pool = [];
     const collect = object => Object.entries(object).forEach(([key, value]) => {
         if (!pool.includes(key)) pool.push(key);
-        if (typeof value === 'object') collect(value);
+        if (typeof value === 'object' && !Buffer.isBuffer(value)) collect(value);
     });
     appData.forEach(collect);
     const entries = appData.map((data, i) => {
@@ -124,6 +125,48 @@ async function importMetadata(app, files) {
     Object.defineProperty(input, 'files', { configurable: true, value: files });
     input.dispatchEvent(new app.window.Event('change'));
     await until(() => !app.document.getElementById('import-metadata-button').disabled);
+}
+
+test('a malformed UTF-8 name does not block import of valid Demo metadata', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Trial')])), { verifiedDemosOnly: true });
+    const files = metadataFiles([{ id: 10, name: 'Broken Name', type: 'Demo' }], [{ id: 1, apps: [10] }]);
+    const buffer = Buffer.from(await files[0].arrayBuffer());
+    const position = buffer.indexOf(cstring('Broken Name'));
+    assert.notEqual(position, -1);
+    buffer[position] = 0xff;
+    files[0].arrayBuffer = async () => arrayBuffer(buffer);
+    await importMetadata(app, files);
+    assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 1 apps and 1 packages/);
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    assert.match(app.document.querySelector('#review-list').textContent, /10 = Demo/);
+});
+
+test('a malformed UTF-16 name does not block import of valid Demo metadata', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Trial')])), { verifiedDemosOnly: true });
+    const files = metadataFiles([{ id: 10, name: Buffer.from([0x00, 0xd8]), type: 'Demo' }], [{ id: 1, apps: [10] }]);
+    await importMetadata(app, files);
+    assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 1 apps and 1 packages/);
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+});
+
+for (const field of ['type-key', 'type-value']) {
+    test(`malformed ${field} never qualifies an application as a Demo`, async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Game Demo')])), { verifiedDemosOnly: true });
+        const files = metadataFiles([{ id: 10, type: 'Demo' }], [{ id: 1, apps: [10] }]);
+        const buffer = Buffer.from(await files[0].arrayBuffer());
+        const position = buffer.indexOf(cstring(field === 'type-key' ? 'type' : 'Demo'));
+        assert.notEqual(position, -1);
+        buffer[position] = 0xff;
+        files[0].arrayBuffer = async () => arrayBuffer(buffer);
+        await importMetadata(app, files);
+        assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 1 apps and 1 packages/);
+        await app.scan();
+        assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Scan Complete');
+        assert.equal(app.document.querySelector('#review-proceed-button'), null);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
 }
 
 test('scans from the first page through cursor links and an empty-match page, deduplicating demos', async t => {

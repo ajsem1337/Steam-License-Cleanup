@@ -2,7 +2,7 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.9.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.9.1-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
@@ -86,6 +86,8 @@ Typical cache folders:
 | macOS | `~/Library/Application Support/Steam/appcache/` |
 
 The selected files are parsed **in this browser tab**. They are not uploaded, modified, or stored in localStorage; unused fields such as PICS tokens are discarded. Import them again after refreshing the page. Supported cache formats are appinfo versions 39–41 and packageinfo versions 39–40.
+
+Malformed text bytes are displayed as replacement characters instead of blocking the whole import. File structure, record boundaries, and App ID validation remain strict; a missing or malformed application type never qualifies as `Demo`.
 
 Verification reflects the **imported cache**, not a live Steam server lookup. Old or incomplete caches can be stale or omit products. The script never treats missing metadata as a demo and does not fall back to the package name. Public store APIs were checked for the reported package IDs, but they do not expose contents for several hidden/free demo packages, so those APIs cannot provide complete verification here.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Cleanup
 // @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
-// @version      1.9.0
+// @version      1.9.1
 // @description  Verifies demo licenses using Steam client metadata, scans all license pages, and allows review before removal. Includes optional name filters, progress, rate-limit handling, and cancellation.
 // @author       PatrickJnr (Enhanced by Gemini)
 // @match        https://store.steampowered.com/account/licenses*
@@ -46,7 +46,9 @@
             this.position = 0;
             this.limit = buffer.byteLength;
             this.strings = null;
-            this.decoder = new TextDecoder('utf-8', { fatal: true });
+            // A malformed character in a name or unused field must not reject the
+            // entire cache. Replaced characters cannot match the exact type Demo.
+            this.decoder = new TextDecoder('utf-8');
         }
         require(size) {
             if (!Number.isSafeInteger(size) || size < 0 || this.position + size > this.limit) {
@@ -105,7 +107,7 @@
                             this.position += 2;
                             if (character === 0) break;
                         }
-                        value = new TextDecoder('utf-16le', { fatal: true }).decode(this.bytes.subarray(start, this.position - 2));
+                        value = new TextDecoder('utf-16le').decode(this.bytes.subarray(start, this.position - 2));
                         break;
                     }
                     case 7: case 10: value = this.uint64().toString(); break;
