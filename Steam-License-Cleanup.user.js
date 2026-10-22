@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Cleanup
 // @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
-// @version      1.9.2
+// @version      1.10.0
 // @description  Verifies demo licenses using Steam client metadata, scans all license pages, and allows review before removal. Includes optional name filters, progress, rate-limit handling, and cancellation.
 // @author       PatrickJnr (Enhanced by Gemini)
 // @match        https://store.steampowered.com/account/licenses*
@@ -30,10 +30,13 @@
         isScanning: false,
         isImporting: false,
         metadata: null,
+        ownedPackages: null,
         scanStats: null,
         cleanupController: null,
         cleanupStatus: "",
         removedDetails: [],
+        skippedDetails: [],
+        notOwnedDetails: [],
         scannedLicenses: [] // Holds { packageId, details }
     };
 
@@ -458,6 +461,30 @@
         return Math.min(300000, Math.max(30000 * 2 ** attempt, requested || 0));
     };
 
+    const fetchOwnedPackages = async (signal) => {
+        // Same current-ownership endpoint used by SteamDB/Augmented Steam.
+        // Cache metadata and the license history page do not prove ownership.
+        const url = new URL('/dynamicstore/userdata/', window.location.origin);
+        url.searchParams.set('_', String(Date.now()));
+        for (let attempt = 0; ; attempt++) {
+            signal?.throwIfAborted();
+            const response = await fetch(url.href, { credentials: 'same-origin', cache: 'no-store', signal });
+            if (response.status === 429 && attempt < 3) {
+                await wait(retryDelay(response, attempt), signal);
+                continue;
+            }
+            if (!response.ok) throw new Error(`Cannot check current package ownership (HTTP ${response.status}).`);
+            let data;
+            try { data = await response.json(); }
+            catch { throw new Error('Cannot read current package ownership. Sign in to the Steam Store and try again.'); }
+            const packages = data?.rgOwnedPackages;
+            if (!Array.isArray(packages) || packages.length === 0 || !packages.every(id => Number.isSafeInteger(id) && id >= 0)) {
+                throw new Error('Current package ownership is unavailable. Sign in to the Steam Store and try again.');
+            }
+            return new Set(packages.map(String));
+        }
+    };
+
     const setControlsDisabled = (disabled) => {
         document.querySelectorAll('#cleanup-controls button, #cleanup-controls input')
             .forEach(control => { control.disabled = disabled; });
@@ -541,6 +568,7 @@
                     }
                 }
                 const packageId = packageIdMatch[1];
+                state.scanStats.seen.add(packageId);
                 let verification = '';
                 if (state.settings.verifiedDemosOnly) {
                     const result = verifyDemoPackage(packageId);
@@ -565,7 +593,8 @@
         }
         state.isScanning = true;
         state.scannedLicenses = [];
-        state.scanStats = { demo: new Set(), other: new Set(), unknown: new Set() };
+        state.ownedPackages = null;
+        state.scanStats = { demo: new Set(), other: new Set(), unknown: new Set(), seen: new Set(), notOwned: new Set() };
         setControlsDisabled(true);
         const { modal, statusElement } = showWorkingModal(
             "Scanning Licenses",
@@ -628,8 +657,18 @@
                 await wait(500);
             }
 
+            statusElement.textContent = 'Checking which packages you currently own...';
+            state.ownedPackages = await fetchOwnedPackages();
+            for (const id of state.scanStats.seen) {
+                if (!state.ownedPackages.has(id)) {
+                    state.scanStats.notOwned.add(id);
+                    state.scanStats.demo.delete(id);
+                    state.scanStats.other.delete(id);
+                    state.scanStats.unknown.delete(id);
+                }
+            }
             modal.remove();
-            state.scannedLicenses = allLicenses;
+            state.scannedLicenses = allLicenses.filter(license => state.ownedPackages.has(license.packageId));
             showReviewModal();
         } catch (error) {
             console.error('License scan failed:', error);
@@ -646,10 +685,17 @@
     const removeNextPackage = async (licensesToRemove, i, progressBar, statusText) => {
         const signal = state.cleanupController.signal;
         try {
+            updateProgressBar(progressBar, statusText, 0, 'Refreshing current package ownership before removal...');
+            state.ownedPackages = await fetchOwnedPackages(signal);
             for (; i < licensesToRemove.length; i++) {
                 signal.throwIfAborted();
                 const license = licensesToRemove[i];
+                if (!state.ownedPackages.has(license.packageId)) {
+                    state.notOwnedDetails.push(`${license.details} — Package no longer owned; no removal request sent`);
+                    continue;
+                }
                 const progress = (i / licensesToRemove.length) * 100;
+                let duplicateRequest = false;
                 for (let attempt = 0; ; attempt++) {
                     signal.throwIfAborted();
                     updateProgressBar(progressBar, statusText, progress, `Removing: ${license.details}`);
@@ -668,6 +714,12 @@
                         const data = await response.json();
                         const result = Number(data.success);
                         rateLimited = result === 84;
+                        if (result === 29) {
+                            // DuplicateRequest is not confirmation of a new removal.
+                            // Do not retry it or let one stale entry block the queue.
+                            duplicateRequest = true;
+                            break;
+                        }
                         // Other nonzero Steam result codes are errors, not successes.
                         if (!rateLimited && result !== 1) {
                             throw new Error(`Steam rejected ${license.details} (result ${data.success}).`);
@@ -680,11 +732,17 @@
                     await wait(delay, signal);
                 }
 
-                state.removedDetails.push(license.details);
-                state.scannedLicenses = state.scannedLicenses.filter(item => item.packageId !== license.packageId);
+                if (duplicateRequest) {
+                    const details = `${license.details} — DuplicateRequest (29), removal not confirmed in this run`;
+                    state.skippedDetails.push(details);
+                    console.warn('Skipped duplicate removal request:', details);
+                } else {
+                    state.removedDetails.push(license.details);
+                    state.scannedLicenses = state.scannedLicenses.filter(item => item.packageId !== license.packageId);
+                }
                 const completedProgress = ((i + 1) / licensesToRemove.length) * 100;
                 if (i + 1 < licensesToRemove.length) {
-                    const message = `Removed ${state.removedDetails.length} of ${licensesToRemove.length}. Waiting ${state.settings.removalDelay / 1000}s for next removal...`;
+                    const message = `Processed ${i + 1} of ${licensesToRemove.length}: ${state.removedDetails.length} removed, ${state.skippedDetails.length + state.notOwnedDetails.length} skipped. Waiting ${state.settings.removalDelay / 1000}s...`;
                     updateProgressBar(progressBar, statusText, completedProgress, message);
                     await wait(state.settings.removalDelay, signal);
                 } else {
@@ -727,6 +785,8 @@
         state.cleanupController = new AbortController();
         state.cleanupStatus = 'Cleanup complete.';
         state.removedDetails = []; // Reset for this run
+        state.skippedDetails = [];
+        state.notOwnedDetails = [];
         removeNextPackage(licensesToRemove, 0, progressBar, statusText);
     };
 
@@ -809,8 +869,12 @@
     };
 
     const exportRemovedLicenses = () => {
-        if (state.removedDetails.length === 0) return;
-        const textToSave = state.removedDetails.join("\n");
+        if (state.removedDetails.length === 0 && state.skippedDetails.length === 0 && state.notOwnedDetails.length === 0) return;
+        const textToSave = [
+            'Confirmed removals:', ...state.removedDetails,
+            '', 'Duplicate requests skipped (not confirmed removed in this run):', ...state.skippedDetails,
+            '', 'Packages no longer owned (no removal request sent):', ...state.notOwnedDetails
+        ].join("\n");
         const blob = new Blob([textToSave], { type: "text/plain" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -865,8 +929,9 @@
         const verificationSummary = state.settings.verifiedDemosOnly
             ? `Verified against imported Steam cache. Skipped ${state.scanStats.other.size} packages containing non-demo apps and ${state.scanStats.unknown.size} packages with missing metadata. Missing metadata never qualifies a package for removal.`
             : 'Name-filter mode: application types have NOT been verified.';
+        const ownershipSummary = `Current SubID ownership checked with Steam. Skipped ${state.scanStats.notOwned.size} packages not currently owned.`;
         if (state.scannedLicenses.length === 0) {
-            showInfoModal("Scan Complete", `No removable licenses matching your criteria were found. ${verificationSummary}`);
+            showInfoModal("Scan Complete", `No removable licenses matching your criteria were found. ${ownershipSummary} ${verificationSummary}`);
             return;
         }
         const listItems = state.scannedLicenses.map((lic, index) =>
@@ -874,6 +939,7 @@
         ).join("");
 
         const content = `
+            <p>${ownershipSummary}</p>
             <p>${verificationSummary}</p>
             <p>Found <strong>${state.scannedLicenses.length}</strong> license(s) matching your criteria. Review the list below and uncheck any you wish to keep.</p>
             <div class="review-controls">
@@ -920,7 +986,12 @@
 
     const showSummaryModal = () => {
         const listItems = state.removedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join("");
-        const content = `<p>${escapeHTML(state.cleanupStatus)} Successfully removed <strong>${state.removedDetails.length}</strong> license(s).</p> ${state.removedDetails.length > 0 ? `<ul>${listItems}</ul>` : ''}`;
+        const skippedItems = state.skippedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join('');
+        const notOwnedItems = state.notOwnedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join('');
+        const content = `<p>${escapeHTML(state.cleanupStatus)} Successfully removed <strong>${state.removedDetails.length}</strong> license(s).</p>
+            ${state.removedDetails.length > 0 ? `<ul>${listItems}</ul>` : ''}
+            ${state.skippedDetails.length > 0 ? `<p>Duplicate requests skipped: <strong>${state.skippedDetails.length}</strong>. These were not counted as confirmed removals in this run. Rescan to check current license state.</p><ul>${skippedItems}</ul>` : ''}
+            ${state.notOwnedDetails.length > 0 ? `<p>Packages no longer owned: <strong>${state.notOwnedDetails.length}</strong>. No removal requests were sent for these packages.</p><ul>${notOwnedItems}</ul>` : ''}`;
         const buttons = [{
             text: "Export List",
             closes: false,
@@ -932,7 +1003,7 @@
             onClick: () => window.location.reload()
         }];
         const modal = showModal("Cleanup Summary", content, buttons);
-        if (state.removedDetails.length === 0) {
+        if (state.removedDetails.length === 0 && state.skippedDetails.length === 0 && state.notOwnedDetails.length === 0) {
             modal.querySelector('#export-button').style.display = 'none';
         }
     };

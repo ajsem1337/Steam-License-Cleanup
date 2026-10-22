@@ -8,11 +8,15 @@ const origin = 'https://store.steampowered.com';
 const escape = text => String(text).replace(/[&<>"']/g, char => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[char]));
-const license = (id, name, date = '22 Oct, 2026', removable = true) => `
+const fixturePackageIds = new Set();
+const license = (id, name, date = '22 Oct, 2026', removable = true) => {
+    fixturePackageIds.add(id);
+    return `
     <tr><td>${escape(date)}</td><td>
     ${removable ? `<div class="free_license_remove_link"><a href="javascript:RemoveFreeLicense( ${id}, 'bmFtZQ==' );">Remove</a></div>` : ''}
     ${escape(name)} <a href="https://steamdb.info/sub/${id}/">SteamDB</a>
     </td><td>Complimentary</td></tr>`;
+};
 const page = (rows, next = null) => `<div class="page_content_ctn">
     <table class="account_table"><tr><th>Date</th><th>Name</th><th>Method</th></tr>${rows.join('')}</table>
     ${next ? `<a class="license_paginator_next" href="${escape(next)}">Next</a>` : ''}
@@ -34,6 +38,8 @@ async function setup(t, handler, settings = {}) {
     t.after(() => dom.window.close());
     const { window } = dom;
     const requests = [];
+    const ownershipRequests = [];
+    let ownershipHandler = null;
     const timers = [];
     window.g_sessionID = 'test-session';
     window.TextDecoder = TextDecoder;
@@ -42,6 +48,11 @@ async function setup(t, handler, settings = {}) {
     }));
     window.fetch = async (url, options = {}) => {
         const request = { url: new URL(url, origin), ...options };
+        if (request.url.pathname === '/dynamicstore/userdata/') {
+            ownershipRequests.push(request);
+            return ownershipHandler ? ownershipHandler(request, ownershipRequests)
+                : new Response(JSON.stringify({ rgOwnedPackages: [...fixturePackageIds] }));
+        }
         requests.push(request);
         return handler(request, requests);
     };
@@ -58,7 +69,8 @@ async function setup(t, handler, settings = {}) {
     window.eval(source);
     await until(() => window.document.getElementById('scan-button'));
     return {
-        window, document: window.document, requests, timers,
+        window, document: window.document, requests, ownershipRequests, timers,
+        setOwnership: handler => { ownershipHandler = handler; },
         scan: async () => {
             window.document.getElementById('scan-button').click();
             await until(() => !window.document.querySelector('#working-status'));
@@ -367,6 +379,113 @@ test('a nonzero Steam error is not counted as a successful removal or retried fo
     await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
     assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup stopped.*Successfully removed 0/s);
     assert.equal(app.requests.filter(request => request.method === 'POST').length, 1);
+});
+
+test('Wednesdays DuplicateRequest (29) is skipped and the next selected license is removed', async t => {
+    const app = await setup(t, request => {
+        if (!request.method) return new Response(page([
+            license(1241014, 'Wednesdays Demo'), license(2, 'Another Demo')
+        ]));
+        return new Response(request.body.get('packageid') === '1241014' ? '{"success":29}' : '{"success":1}');
+    }, { removalDelay: 2000 });
+    app.window.console.warn = () => {};
+    await app.scan();
+    app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 2000));
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+    app.advance(app.timers.find(timer => timer.active && timer.delay === 2000));
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['1241014', '2']);
+    const summary = app.document.querySelector('.modal-body').textContent;
+    assert.match(summary, /Cleanup complete.*Successfully removed 1 license/s);
+    assert.match(summary, /Duplicate requests skipped: 1/);
+    assert.match(summary, /Wednesdays Demo.*DuplicateRequest \(29\), removal not confirmed/s);
+    assert.doesNotMatch(summary, /Cleanup stopped/);
+});
+
+test('current SubID ownership excludes the old Wednesdays demo while preserving its full-game package', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page([
+        license(1241014, 'Wednesdays Demo'),
+        license(1452965, 'Wednesdays Limited Free Promotional Package - Nov 2025'),
+        license(3, 'Owned Trial')
+    ])), { verifiedDemosOnly: true });
+    app.setOwnership(() => new Response('{"rgOwnedPackages":[1452965,3]}'));
+    await importMetadata(app, metadataFiles([
+        { id: 3515220, type: 'Demo' }, { id: 2747770, type: 'Game' }, { id: 30, type: 'Demo' }
+    ], [{ id: 1241014, apps: [3515220] }, { id: 1452965, apps: [2747770] }, { id: 3, apps: [30] }]));
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    assert.match(app.document.querySelector('#review-list').textContent, /Owned Trial/);
+    assert.doesNotMatch(app.document.querySelector('#review-list').textContent, /Wednesdays/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages not currently owned/);
+    assert.equal(app.ownershipRequests[0].cache, 'no-store');
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['3']);
+    assert.equal(app.ownershipRequests.length, 2, 'ownership is refreshed again after confirmation');
+});
+
+test('a package lost between scan and confirmation is skipped without a removal request', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}')
+        : new Response(page([license(1, 'No longer owned Demo'), license(2, 'Still owned Demo')])));
+    app.setOwnership((request, requests) => new Response(JSON.stringify({ rgOwnedPackages: requests.length === 1 ? [1, 2] : [2] })));
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 2);
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['2']);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Packages no longer owned: 1/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1 license/);
+});
+
+for (const response of [{}, { rgOwnedPackages: [] }, { rgOwnedPackages: '1,2' }, { rgOwnedPackages: [1, 'bad'] }]) {
+    test('missing or malformed ownership data stops a scan without offering removals', async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Game Demo')])));
+        app.setOwnership(() => new Response(JSON.stringify(response)));
+        await app.scan();
+        assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Scan Failed');
+        assert.match(app.document.querySelector('.modal-body').textContent, /Current package ownership is unavailable/);
+        assert.equal(app.document.querySelector('#review-proceed-button'), null);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('an ownership refresh failure after confirmation sends no removal requests', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Game Demo')])));
+    app.setOwnership((request, requests) => requests.length === 1
+        ? new Response('{"rgOwnedPackages":[1]}') : new Response('', { status: 503 }));
+    await app.scan();
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Cleanup stopped.*current package ownership.*503/s);
+});
+
+test('a queue containing only duplicate requests reports zero confirmed removals and exports skips', async t => {
+    const app = await setup(t, request => request.method
+        ? new Response('{"success":"29"}') : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
+    app.window.console.warn = () => {};
+    await app.scan();
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(app.requests.filter(request => request.method).length, 2);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 0 license/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Duplicate requests skipped: 2/);
+    assert.notEqual(app.document.getElementById('export-button').style.display, 'none');
+    let exported;
+    app.window.URL.createObjectURL = blob => { exported = blob; return 'blob:test'; };
+    app.window.URL.revokeObjectURL = () => {};
+    app.window.HTMLAnchorElement.prototype.click = () => {};
+    app.document.getElementById('export-button').click();
+    const text = await new Promise((resolve, reject) => {
+        const reader = new app.window.FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(exported);
+    });
+    assert.match(text, /Duplicate requests skipped \(not confirmed removed in this run\)/);
+    assert.match(text, /First Demo.*DuplicateRequest \(29\)/);
+    assert.match(text, /Second Demo.*DuplicateRequest \(29\)/);
 });
 
 for (const limit of ['http', 'steam']) {

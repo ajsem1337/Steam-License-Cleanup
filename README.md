@@ -2,7 +2,7 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.9.2-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.10.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
@@ -10,7 +10,11 @@
 
 This fork fixes scanning on Steam's cursor-paginated license page. Scans start from the first page, including when you open the script on a later page, and follow Steam's actual Next links. Pages with no matches do not stop the scan. A failed or incomplete scan shows an error instead of offering a partial list for removal.
 
-By default, the script verifies application types using Steam client metadata you import locally. A removable package qualifies only if **every application it grants has type `Demo`**. Names and user tags are not proof: an old package called “Stellar Stables Demo” can grant an application whose current type is `Game`.
+By default, the script checks **current package ownership** with Steam and verifies application types using Steam client metadata you import locally. A removable package qualifies only if its SubID is currently owned and **every application it grants has type `Demo`**. Names and user tags are not proof: an old package called “Stellar Stables Demo” can grant an application whose current type is `Game`.
+
+The license page can still contain a demo entry that is no longer owned. The checker fetches `rgOwnedPackages` from Steam's signed-in `/dynamicstore/userdata/` endpoint without using a local/browser cache, filters out unowned SubIDs, and refreshes ownership again after removal is confirmed. It does not infer ownership from an App ID, an imported cache entry, or the presence of a Remove link. Missing or malformed ownership data stops the operation rather than falling back to history.
+
+For example, owning the full-game Wednesdays package `1452965` (Game App ID `2747770`) does not establish ownership of its separate demo package `1241014` (Demo App ID `3515220`). Only an actively owned demo package could qualify. A package lost between scan and confirmation is skipped without a removal request.
 
 Packages containing a game, DLC, tool, or any other non-demo application are excluded. Packages with missing contents or missing application types are also excluded and counted in the scan summary. An optional name-filter mode preserves the original cleanup workflow and is explicitly marked unverified.
 
@@ -47,6 +51,7 @@ Packages containing a game, DLC, tool, or any other non-demo application are exc
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🔒 **Removable Licenses Only**     | Selects only licenses with Steam's free-license removal link. Products without that link are skipped. |
 | 🔬 **Demo Type Verification**     | Reads local `packageinfo.vdf` to resolve package → App IDs and `appinfo.vdf` to check each app's `common.type`. Only packages containing demos exclusively qualify. |
+| 📋 **Current Ownership Check**    | Requires the SubID to appear in Steam's current `rgOwnedPackages`, checked during scanning and refreshed before removal. History entries alone do not qualify. |
 | 📅 **Date Range Filtering**        | Target licenses acquired within a specific timeframe. Perfect for cleaning up items from a specific year or event.                                       |
 | 🔎 **Comprehensive Scanning**      | Automatically scans **all pages** of your licenses, finding every match based on your keywords and selected date range.                                  |
 | ✅ **Interactive Review**     | After scanning, you are presented with a detailed list of matches. **Nothing is removed without your final approval.**                      |
@@ -85,7 +90,7 @@ Typical cache folders:
 | Windows | `C:\Program Files (x86)\Steam\appcache\` |
 | macOS | `~/Library/Application Support/Steam/appcache/` |
 
-The selected files are parsed **in this browser tab**. They are not uploaded, modified, or stored in localStorage; unused fields such as PICS tokens are discarded. Import them again after refreshing the page. Supported cache formats are appinfo versions 39–41 and packageinfo versions 39–40.
+The selected files are parsed **in this browser tab**. They are not uploaded, modified, or stored in localStorage; unused fields such as PICS tokens are discarded. Import them again after refreshing the page. Supported cache formats are appinfo versions 39–41 and packageinfo versions 39–40. Ownership checks are separate requests to Steam using your existing Steam Store session.
 
 Malformed text bytes are displayed as replacement characters instead of blocking the whole import. File structure, record boundaries, and App ID validation remain strict; a missing or malformed application type never qualifies as `Demo`.
 
@@ -118,7 +123,7 @@ The existing default delay is **600000 ms (10 minutes)** between removals. For h
 <details>
 <summary><strong>Can this script remove my paid games or DLC?</strong></summary>
 <br>
-The script only selects licenses that expose Steam's <strong>Remove</strong> link for free-license removal. It does not use the paid-purchase removal workflow. Verified mode additionally excludes any package containing a non-demo application according to the imported cache. Name-filter mode provides no such type check. Review the list before confirming.
+The script selects licenses that expose Steam's <strong>Remove</strong> link for free-license removal and appear in Steam's current package-ownership data. It does not use the paid-purchase removal workflow. Verified mode additionally excludes any package containing a non-demo application according to the imported cache. Name-filter mode provides no such type check. Review the list before confirming.
 </details>
 
 <details>
@@ -136,7 +141,7 @@ In name-filter mode, empty inclusion keywords select all removable licenses with
 <details>
 <summary><strong>How does the script identify licenses to remove?</strong></summary>
 <br>
-Verified mode resolves the package's full App ID list from the imported <code>packageinfo.vdf</code> and requires every app's <code>common.type</code> in <code>appinfo.vdf</code> to equal <code>Demo</code>, case-insensitively. It skips mixed packages and missing metadata. Name-filter mode uses literal words and phrases in license names instead. Both modes honor exclusions and the optional date range.
+Both modes require the SubID to appear in Steam's current <code>rgOwnedPackages</code>. Verified mode also resolves the package's full App ID list from the imported <code>packageinfo.vdf</code> and requires every app's <code>common.type</code> in <code>appinfo.vdf</code> to equal <code>Demo</code>, case-insensitively. It skips mixed packages and missing metadata. Name-filter mode uses literal words and phrases in license names instead. Both modes honor exclusions and the optional date range.
 </details>
 
 <details>
@@ -148,7 +153,9 @@ To prevent your account from being temporarily locked out of making changes, the
 <details>
 <summary><strong>What happens if I encounter a rate limit?</strong></summary>
 <br>
-The script handles both HTTP 429 and Steam result 84, waiting at least 30 seconds and increasing the delay on repeated limits. A longer <code>Retry-After</code> value is respected up to five minutes. After four unsuccessful attempts it stops and reports the error. Only Steam success result 1 is counted as a confirmed removal. Other HTTP, network, or Steam errors stop the cleanup; rescan before trying again.
+The script handles both HTTP 429 and Steam result 84, waiting at least 30 seconds and increasing the delay on repeated limits. A longer <code>Retry-After</code> value is respected up to five minutes. After four unsuccessful attempts it stops and reports the error. Only Steam success result 1 is counted as a confirmed removal.
+
+Steam result <strong>29 (DuplicateRequest)</strong> is skipped without retrying, and the queue continues after the configured delay. Skipped duplicates appear separately in the summary and exported report; they are not counted as newly confirmed removals. Rescan to check their current license state. Other HTTP, network, or Steam errors stop the cleanup; rescan before trying again.
 
 <p><strong>Cancel</strong> interrupts the current wait or pending browser request. A request already received by Steam may still finish, so rescan before restarting. The summary counts only confirmed removals.</p>
 </details>
@@ -176,7 +183,7 @@ npm run check
 npm test
 ```
 
-Tests run the userscript in jsdom against simulated Steam license pages, responses, and binary cache files. They cover cursor pagination, pages without matches, duplicate packages, name/date filters, failed scans, review and confirmation, Steam errors, rate limits, cancellation, supported cache versions, invalid imports, mixed packages, missing types, and the “Stellar Stables Demo”/Game counterexample. They do not sign in to Steam or remove real licenses.
+Tests run the userscript in jsdom against simulated Steam license pages, responses, and binary cache files. They cover cursor pagination, pages without matches, duplicate packages, name/date filters, failed scans, review and confirmation, Steam errors, rate limits, cancellation, supported cache versions, invalid imports, mixed packages, missing types, and the “Stellar Stables Demo”/Game counterexample. Ownership tests cover the separate Wednesdays full-game/demo packages, licenses lost after scanning, failed ownership checks, and DuplicateRequest (29) handling. They do not sign in to Steam or remove real licenses.
 
 Cache format references: [xPaw/SteamAppInfo](https://github.com/xPaw/SteamAppInfo), [ValvePython/steam appcache reader](https://github.com/ValvePython/steam/blob/master/steam/utils/appcache.py), and [ValvePython/vdf](https://github.com/ValvePython/vdf). The reader was also smoke-tested against the public binary fixtures in [mexus/steam-vdf-parser](https://github.com/mexus/steam-vdf-parser/tree/master/tests/fixtures).
 
