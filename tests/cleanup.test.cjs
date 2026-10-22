@@ -77,7 +77,7 @@ const cstring = value => Buffer.from(`${value}\0`);
 const arrayBuffer = buffer => buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 function kv(object, pool = null) {
     const parts = [];
-    for (const [key, value] of Object.entries(object)) {
+    for (const [key, value] of (Array.isArray(object) ? object : Object.entries(object))) {
         const keyBytes = pool ? u32(pool.indexOf(key)) : cstring(key);
         if (Buffer.isBuffer(value)) parts.push(Buffer.from([5]), keyBytes, value, Buffer.alloc(2));
         else if (typeof value === 'object') parts.push(Buffer.from([0]), keyBytes, kv(value, pool));
@@ -87,12 +87,12 @@ function kv(object, pool = null) {
     return Buffer.concat([...parts, Buffer.from([8])]);
 }
 function metadataFiles(apps, packages, appVersion = 41, packageVersion = 40) {
-    const appData = apps.map(app => ({ appinfo: {
+    const appData = apps.map(app => ({ appinfo: app.data || {
         appid: app.id,
-        common: { name: app.name || `App ${app.id}`, ...(app.type === undefined ? {} : { type: app.type }) }
+        common: app.common || { name: app.name || `App ${app.id}`, ...(app.type === undefined ? {} : { type: app.type }) }
     } }));
     const pool = [];
-    const collect = object => Object.entries(object).forEach(([key, value]) => {
+    const collect = object => (Array.isArray(object) ? object : Object.entries(object)).forEach(([key, value]) => {
         if (!pool.includes(key)) pool.push(key);
         if (typeof value === 'object' && !Buffer.isBuffer(value)) collect(value);
     });
@@ -112,7 +112,7 @@ function metadataFiles(apps, packages, appVersion = 41, packageVersion = 40) {
         u32(0x06565500 + packageVersion), u32(1),
         ...packages.map(pkg => Buffer.concat([
             u32(pkg.id), Buffer.alloc(packageVersion >= 40 ? 32 : 24),
-            kv({ [String(pkg.id)]: { packageid: pkg.id, appids: Object.fromEntries(pkg.apps.map((id, i) => [String(i), id])) } })
+            kv({ [String(pkg.id)]: pkg.data || { packageid: pkg.id, appids: Object.fromEntries(pkg.apps.map((id, i) => [String(i), id])) } })
         ])), u32(0xffffffff)
     ]);
     return [
@@ -126,6 +126,71 @@ async function importMetadata(app, files) {
     input.dispatchEvent(new app.window.Event('change'));
     await until(() => !app.document.getElementById('import-metadata-button').disabled);
 }
+
+for (const appVersion of [39, 40, 41]) {
+    test(`v${appVersion}: duplicate serverbrowsername fields do not block demo verification`, async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Trial')])), { verifiedDemosOnly: true });
+        const files = metadataFiles([{ id: 10, common: [
+            ['name', 'Trial'], ['serverbrowsername', 'First'], ['ServerBrowserName', 'Second'], ['type', 'Demo']
+        ] }], [{ id: 1, apps: [10] }], appVersion);
+        await importMetadata(app, files);
+        assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 1 apps and 1 packages/);
+        await app.scan();
+        assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+        assert.match(app.document.querySelector('#review-list').textContent, /10 = Demo/);
+    });
+}
+
+for (const appData of [
+    { appid: 10, common: [['type', 'Game'], ['type', 'Demo']] },
+    [['appid', 10], ['common', { type: 'Game' }], ['common', { type: 'Demo' }]],
+    [['appid', 20], ['appid', 10], ['common', { type: 'Demo' }]]
+]) {
+    test('duplicate app identity/type fields are skipped without blocking other apps', async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Ambiguous Demo'), license(2, 'Valid Demo')])), { verifiedDemosOnly: true });
+        await importMetadata(app, metadataFiles([
+            { id: 10, data: appData }, { id: 20, type: 'Demo' }
+        ], [{ id: 1, apps: [10] }, { id: 2, apps: [20] }]));
+        assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 2 apps and 2 packages/);
+        await app.scan();
+        assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+        assert.match(app.document.querySelector('#review-list').textContent, /Valid Demo/);
+        assert.doesNotMatch(app.document.querySelector('#review-list').textContent, /Ambiguous Demo/);
+    });
+}
+
+for (const packageData of [
+    [['packageid', 1], ['appids', { 0: 30 }], ['appids', { 0: 10 }]],
+    { packageid: 1, appids: [['0', 30], ['0', 10]] },
+    [['packageid', 99], ['packageid', 1], ['appids', { 0: 10 }]]
+]) {
+    test('duplicate package contents cannot hide a full game behind a later Demo value', async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Ambiguous Demo'), license(2, 'Valid Demo')])), { verifiedDemosOnly: true });
+        await importMetadata(app, metadataFiles([
+            { id: 10, type: 'Demo' }, { id: 30, type: 'Game' }
+        ], [{ id: 1, data: packageData }, { id: 2, apps: [10] }]));
+        assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 2 apps and 2 packages/);
+        await app.scan();
+        assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+        assert.match(app.document.querySelector('#review-list').textContent, /Valid Demo/);
+        assert.doesNotMatch(app.document.querySelector('#review-list').textContent, /Ambiguous Demo/);
+    });
+}
+
+test('duplicate App IDs or SubIDs are skipped instead of replacing earlier metadata', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'Duplicate app Demo'), license(2, 'Duplicate package Demo'), license(3, 'Valid Demo')
+    ])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([
+        { id: 10, type: 'Game' }, { id: 10, type: 'Demo' }, { id: 20, type: 'Demo' }
+    ], [
+        { id: 1, apps: [10] }, { id: 2, apps: [10] }, { id: 2, apps: [20] }, { id: 3, apps: [20] }
+    ]));
+    assert.match(app.document.getElementById('metadata-status').textContent, /Loaded 2 apps and 3 packages/);
+    await app.scan();
+    assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
+    assert.match(app.document.querySelector('#review-list').textContent, /Valid Demo/);
+});
 
 test('a malformed UTF-8 name does not block import of valid Demo metadata', async t => {
     const app = await setup(t, () => new Response(page([license(1, 'Trial')])), { verifiedDemosOnly: true });

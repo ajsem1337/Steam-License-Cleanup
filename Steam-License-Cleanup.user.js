@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Cleanup
 // @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
-// @version      1.9.1
+// @version      1.9.2
 // @description  Verifies demo licenses using Steam client metadata, scans all license pages, and allows review before removal. Includes optional name filters, progress, rate-limit handling, and cancellation.
 // @author       PatrickJnr (Enhanced by Gemini)
 // @match        https://store.steampowered.com/account/licenses*
@@ -39,6 +39,9 @@
 
     // Steam cache formats: https://github.com/xPaw/SteamAppInfo
     // Read locally selected files only; tokens and other unused fields are discarded.
+    const duplicateKeys = Symbol('duplicateSteamMetadataKeys');
+    const hasDuplicate = (object, key) => Boolean(object?.[duplicateKeys]?.has(key));
+    const isRecord = value => value !== null && typeof value === 'object';
     class CacheReader {
         constructor(buffer) {
             this.bytes = new Uint8Array(buffer);
@@ -113,7 +116,12 @@
                     case 7: case 10: value = this.uint64().toString(); break;
                     default: throw new Error(`Unsupported Steam metadata value type ${type}.`);
                 }
-                if (Object.hasOwn(result, key)) throw new Error(`Duplicate Steam metadata key: ${key}.`);
+                // KeyValues allows repeated names. Keep reading descriptive fields,
+                // but record ambiguity so overwritten type/contents cannot qualify.
+                if (Object.hasOwn(result, key)) {
+                    if (!result[duplicateKeys]) result[duplicateKeys] = new Set();
+                    result[duplicateKeys].add(key);
+                }
                 result[key] = value;
             }
         }
@@ -157,14 +165,17 @@
             reader.skip(4); // info state
             const updated = reader.uint32();
             reader.skip(8 + 20 + 4 + (version >= 40 ? 20 : 0));
-            const data = reader.keyValues().appinfo;
-            if (reader.position !== end || !data || (data.appid !== undefined && Number(data.appid) !== appid)) {
+            const root = reader.keyValues();
+            const data = root.appinfo;
+            if (reader.position !== end) {
                 throw new Error(`Invalid appinfo.vdf record for App ID ${appid}.`);
             }
-            if (apps.has(String(appid))) throw new Error(`Duplicate App ID ${appid}.`);
+            const identityKnown = isRecord(data) && !hasDuplicate(root, 'appinfo') && !hasDuplicate(data, 'appid')
+                && (data.appid === undefined || Number(data.appid) === appid) && !apps.has(String(appid));
+            const common = identityKnown && !hasDuplicate(data, 'common') && isRecord(data.common) ? data.common : null;
             apps.set(String(appid), {
-                name: typeof data.common?.name === 'string' ? data.common.name : '',
-                type: typeof data.common?.type === 'string' ? data.common.type.toLowerCase() : '',
+                name: !hasDuplicate(common, 'name') && typeof common?.name === 'string' ? common.name : '',
+                type: !hasDuplicate(common, 'type') && typeof common?.type === 'string' ? common.type.toLowerCase() : '',
                 updated
             });
             reader.limit = outerLimit;
@@ -186,12 +197,13 @@
             const packageid = reader.uint32();
             if (packageid === 0xffffffff) break;
             reader.skip(20 + 4 + ((magic & 0xff) >= 40 ? 8 : 0));
-            const data = reader.keyValues()[String(packageid)];
-            if (!data || (data.packageid !== undefined && Number(data.packageid) !== packageid)) {
-                throw new Error(`Invalid packageinfo.vdf record for Package ID ${packageid}.`);
-            }
-            if (packages.has(String(packageid))) throw new Error(`Duplicate Package ID ${packageid}.`);
-            const appids = data.appids && typeof data.appids === 'object' ? Object.values(data.appids) : [];
+            const root = reader.keyValues();
+            const data = root[String(packageid)];
+            const contentsKnown = isRecord(data) && !hasDuplicate(root, String(packageid))
+                && !hasDuplicate(data, 'packageid') && !hasDuplicate(data, 'appids') && !packages.has(String(packageid))
+                && (data.packageid === undefined || Number(data.packageid) === packageid)
+                && isRecord(data.appids) && !data.appids[duplicateKeys]?.size;
+            const appids = contentsKnown ? Object.values(data.appids) : [];
             packages.set(String(packageid), appids.length && appids.every(id => Number.isSafeInteger(Number(id)) && Number(id) > 0)
                 ? [...new Set(appids.map(id => String(Number(id))))] : []);
             if (packages.size % 200 === 0) await wait(0);
