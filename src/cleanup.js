@@ -103,6 +103,10 @@ const removeNextPackage = async (licensesToRemove, i, progressBar, statusText) =
 
 const startCleanup = (licensesToRemove) => {
     if (state.isCleaning || state.isScanning || state.isImporting || licensesToRemove.length === 0) return;
+    if (!updateRemovalDelay()) {
+        showInfoModal('Invalid Delay', 'Enter a valid number of minutes between removals before starting cleanup.');
+        return;
+    }
     if (!state.scanContext || state.scanContext !== scanContext()) {
         showInfoModal('Scan Again', 'Your filters or metadata changed after scanning. Scan again before removing licenses.');
         return;
@@ -115,7 +119,8 @@ const startCleanup = (licensesToRemove) => {
         showInfoModal("Error: Not Logged In", "Could not find a valid Steam session ID. Please make sure you are fully logged into store.steampowered.com and refresh the page.");
         return;
     }
-    const mainContainer = document.getElementById("cleanup-controls");
+    const mainContainer = document.getElementById('cleanup-progress-host');
+    mainContainer.hidden = false;
     setControlsDisabled(true);
 
     const { progressBarContainer, progressBar, statusText } = createProgressBar();
@@ -129,5 +134,6 @@ const startCleanup = (licensesToRemove) => {
     state.removedDetails = [];
     state.skippedDetails = [];
     state.notOwnedDetails = [];
+    updateWorkspaceStatus();
     removeNextPackage(licensesToRemove, 0, progressBar, statusText);
 };

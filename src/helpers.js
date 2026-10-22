@@ -6,7 +6,11 @@ const steamId = value => {
 };
 
 const scanContext = () => JSON.stringify({
-    settings: state.settings,
+    settings: {
+        profile: state.settings.profile,
+        keywords: state.settings.profile === 'custom' ? state.settings.keywords : [],
+        exclusions: state.settings.exclusions
+    },
     start: document.getElementById('start-date-input').value,
     end: document.getElementById('end-date-input').value
 });
@@ -14,6 +18,9 @@ const scanContext = () => JSON.stringify({
 const invalidateScan = () => {
     state.scannedLicenses = [];
     state.scanContext = null;
+    state.scanSummary = null;
+    state.pendingScan = null;
+    updateWorkspaceStatus();
 };
 
 const downloadText = (filename, text) => {
@@ -78,7 +85,12 @@ const fetchOwnedPackages = async (signal) => {
     url.searchParams.set('_', String(Date.now()));
     for (let attempt = 0; ; attempt++) {
         signal?.throwIfAborted();
-        const response = await fetch(url.href, { credentials: 'same-origin', cache: 'no-store', signal });
+        // Match SteamDB's session-refresh request. Accepting HTML allows Steam's
+        // expired-cookie redirect flow; the endpoint still returns JSON on success.
+        // https://github.com/SteamDatabase/BrowserExtension/blob/master/scripts/background.js
+        const response = await fetch(url.href, {
+            credentials: 'include', cache: 'no-store', signal, headers: { Accept: 'text/html' }
+        });
         if (response.status === 429 && attempt < 3) {
             await wait(retryDelay(response, attempt), signal);
             continue;
@@ -86,16 +98,32 @@ const fetchOwnedPackages = async (signal) => {
         if (!response.ok) throw new Error(`Cannot check current package ownership (HTTP ${response.status}).`);
         let data;
         try { data = await response.json(); }
-        catch { throw new Error('Cannot read current package ownership. Sign in to the Steam Store and try again.'); }
+        catch { throw new Error('Cannot read current package ownership: Steam returned a login page or another non-JSON response. Open the Steam Store to refresh your session, then retry the ownership check.'); }
         const packages = data?.rgOwnedPackages;
-        if (!Array.isArray(packages) || packages.length === 0 || !packages.every(id => typeof id === 'number' && steamId(id))) {
-            throw new Error('Current package ownership is unavailable. Sign in to the Steam Store and try again.');
+        if (!Array.isArray(packages)) {
+            throw new Error('Current package ownership is unavailable: Steam did not return an rgOwnedPackages array. Retry the ownership check; this response does not prove you are signed out.');
         }
+        if (!packages.length) {
+            throw new Error('Current package ownership is unavailable: Steam returned an empty rgOwnedPackages list. Open the Steam Store to refresh your session, then retry the ownership check.');
+        }
+        // The ownership list is not an App ID list. Non-positive or large package
+        // entries must not invalidate ownership of unrelated, eligible packages.
+        // Preserve exact integer identities; never coerce booleans or objects.
+        const invalidIndex = packages.findIndex(id => !(
+            (typeof id === 'number' && Number.isSafeInteger(id))
+            || (typeof id === 'string' && /^-?\d+$/.test(id) && Number.isSafeInteger(Number(id)))
+        ));
+        if (invalidIndex !== -1) {
+            throw new Error(`Current package ownership is unavailable: unexpected package entry at index ${invalidIndex} (type ${typeof packages[invalidIndex]}). Retry the ownership check; this is a data-format error, not proof of a signed-out session.`);
+        }
+        signal?.throwIfAborted();
         return new Set(packages.map(String));
     }
 };
 
 const setControlsDisabled = (disabled) => {
-    document.querySelectorAll('#cleanup-controls button, #cleanup-controls input, #cleanup-controls select')
+    document.querySelectorAll('#cleanup-controls button, #cleanup-controls input, #cleanup-controls select, #cleanup-controls textarea')
         .forEach(control => { control.disabled = disabled; });
+    if (!disabled) updateProfileUI();
+    updateWorkspaceStatus();
 };

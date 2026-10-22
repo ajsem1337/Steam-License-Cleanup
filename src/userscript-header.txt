@@ -6,6 +6,6 @@
 // @author       PatrickJnr, ajsem1337
 // @match        https://store.steampowered.com/account/licenses*
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/fix/steam-license-pagination/Steam-License-Cleanup.user.js
-// @downloadURL  https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/fix/steam-license-pagination/Steam-License-Cleanup.user.js
+// @updateURL    https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/main/Steam-License-Cleanup.user.js
+// @downloadURL  https://raw.githubusercontent.com/ajsem1337/Steam-License-Cleanup/main/Steam-License-Cleanup.user.js
 // ==/UserScript==
