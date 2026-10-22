@@ -2,7 +2,7 @@
 
 # 🔰 Steam License Cleanup 🔰
 
-![Version](https://img.shields.io/badge/version-1.10.0-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
+![Version](https://img.shields.io/badge/version-1.10.1-blue?style=for-the-badge)![License](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)![Compatible](https://img.shields.io/badge/Tampermonkey-Compatible-brightgreen?style=for-the-badge)
 
 </div>
 
@@ -155,7 +155,7 @@ To prevent your account from being temporarily locked out of making changes, the
 <br>
 The script handles both HTTP 429 and Steam result 84, waiting at least 30 seconds and increasing the delay on repeated limits. A longer <code>Retry-After</code> value is respected up to five minutes. After four unsuccessful attempts it stops and reports the error. Only Steam success result 1 is counted as a confirmed removal.
 
-Steam result <strong>29 (DuplicateRequest)</strong> is skipped without retrying, and the queue continues after the configured delay. Skipped duplicates appear separately in the summary and exported report; they are not counted as newly confirmed removals. Rescan to check their current license state. Other HTTP, network, or Steam errors stop the cleanup; rescan before trying again.
+Steam result <strong>29 (DuplicateRequest)</strong> triggers another uncached ownership check. If Steam no longer lists that SubID, the entry is recorded separately and the queue continues. If Steam still lists it as owned, the queue stops with an explicit inconsistency message instead of issuing hundreds of ineffective requests. Skipped duplicates appear separately in the summary and exported report; they are not counted as newly confirmed removals. This check cannot distinguish delayed ownership updates from an ineffective removal, so contradictory data stops the queue. Other HTTP, network, or Steam errors also stop the cleanup; rescan before trying again.
 
 <p><strong>Cancel</strong> interrupts the current wait or pending browser request. A request already received by Steam may still finish, so rescan before restarting. The summary counts only confirmed removals.</p>
 </details>

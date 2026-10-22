@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam License Cleanup
 // @namespace    https://github.com/PatrickJnr/Steam-License-Cleanup/
-// @version      1.10.0
+// @version      1.10.1
 // @description  Verifies demo licenses using Steam client metadata, scans all license pages, and allows review before removal. Includes optional name filters, progress, rate-limit handling, and cancellation.
 // @author       PatrickJnr (Enhanced by Gemini)
 // @match        https://store.steampowered.com/account/licenses*
@@ -716,7 +716,7 @@
                         rateLimited = result === 84;
                         if (result === 29) {
                             // DuplicateRequest is not confirmation of a new removal.
-                            // Do not retry it or let one stale entry block the queue.
+                            // Recheck ownership below before sending another removal.
                             duplicateRequest = true;
                             break;
                         }
@@ -736,6 +736,13 @@
                     const details = `${license.details} — DuplicateRequest (29), removal not confirmed in this run`;
                     state.skippedDetails.push(details);
                     console.warn('Skipped duplicate removal request:', details);
+                    // A long series of 29s must not silently consume the removal
+                    // rate limit. Verify the result against a fresh Steam response.
+                    updateProgressBar(progressBar, statusText, progress, 'Steam returned DuplicateRequest (29). Checking whether this package is still owned...');
+                    state.ownedPackages = await fetchOwnedPackages(signal);
+                    if (state.ownedPackages.has(license.packageId)) {
+                        throw new Error(`Steam returned DuplicateRequest (29) for Package ID ${license.packageId}, but its ownership response still lists this package. No removal was confirmed for this entry; the queue was stopped to avoid sending more unproductive requests.`);
+                    }
                 } else {
                     state.removedDetails.push(license.details);
                     state.scannedLicenses = state.scannedLicenses.filter(item => item.packageId !== license.packageId);

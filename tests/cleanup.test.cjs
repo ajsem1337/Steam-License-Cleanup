@@ -389,6 +389,9 @@ test('Wednesdays DuplicateRequest (29) is skipped and the next selected license 
         return new Response(request.body.get('packageid') === '1241014' ? '{"success":29}' : '{"success":1}');
     }, { removalDelay: 2000 });
     app.window.console.warn = () => {};
+    app.setOwnership((request, requests) => new Response(JSON.stringify({
+        rgOwnedPackages: requests.length <= 2 ? [1241014, 2] : [2]
+    })));
     await app.scan();
     app.remove();
     await until(() => app.timers.some(timer => timer.active && timer.delay === 2000));
@@ -401,6 +404,22 @@ test('Wednesdays DuplicateRequest (29) is skipped and the next selected license 
     assert.match(summary, /Duplicate requests skipped: 1/);
     assert.match(summary, /Wednesdays Demo.*DuplicateRequest \(29\), removal not confirmed/s);
     assert.doesNotMatch(summary, /Cleanup stopped/);
+});
+
+test('a duplicate request for a package still reported as owned stops before the next removal', async t => {
+    const app = await setup(t, request => request.method
+        ? new Response('{"success":29}') : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
+    app.window.console.warn = () => {};
+    await app.scan();
+    app.remove();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+    assert.equal(app.ownershipRequests.length, 3);
+    const summary = app.document.querySelector('.modal-body').textContent;
+    assert.match(summary, /Cleanup stopped.*Successfully removed 0 license/s);
+    assert.match(summary, /Duplicate requests skipped: 1/);
+    assert.match(summary, /Package ID 1.*ownership response still lists this package/s);
+    assert.equal(app.document.getElementById('scan-button').disabled, false);
 });
 
 test('current SubID ownership excludes the old Wednesdays demo while preserving its full-game package', async t => {
@@ -465,6 +484,9 @@ test('a queue containing only duplicate requests reports zero confirmed removals
     const app = await setup(t, request => request.method
         ? new Response('{"success":"29"}') : new Response(page([license(1, 'First Demo'), license(2, 'Second Demo')])));
     app.window.console.warn = () => {};
+    app.setOwnership((request, requests) => new Response(JSON.stringify({
+        rgOwnedPackages: requests.length <= 2 ? [1, 2, 999] : requests.length === 3 ? [2, 999] : [999]
+    })));
     await app.scan();
     app.remove();
     await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
