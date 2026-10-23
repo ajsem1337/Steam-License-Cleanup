@@ -87,8 +87,10 @@ Supported metadata formats: `appinfo.vdf` versions 39–41 and `packageinfo.vdf`
 
 ## Credits and license
 
-Version 2.0 of this fork was developed with AI tools, including AI-generated code and documentation.
-
 Based on [PatrickJnr/Steam-License-Cleanup](https://github.com/PatrickJnr/Steam-License-Cleanup), with contributions credited to @retvil, @TCNOco, @RavenStryker, and @KAURkulaator.
 
 [MIT License](LICENSE).
+
+## AI assistance
+
+**Made with AI.** This project was developed with AI assistance, including code, documentation, and testing.
