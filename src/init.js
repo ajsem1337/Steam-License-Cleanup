@@ -3,18 +3,22 @@ const updateWorkspaceStatus = () => {
     const root = document.getElementById('cleanup-controls');
     if (!root) return;
     const busy = state.isScanning || state.isCleaning || state.isImporting;
-    const results = Boolean(state.scanContext && state.scannedLicenses.length);
+    const results = Boolean((state.scanContext || state.requiresRescan) && (state.collectedScan?.licenses.length || state.collectedScan?.stats.unknown.size));
     root.dataset.stage = state.isCleaning ? 'cleaning' : state.isScanning ? 'scanning' : results ? 'review' : 'configure';
     const label = document.getElementById('workspace-status');
-    if (label) label.textContent = state.isImporting ? 'Reading metadata' : state.isScanning ? (state.pendingScan ? 'Checking ownership' : 'Scanning licenses') : state.isCleaning ? 'Cleanup in progress' : state.pendingScan ? 'Ownership check needed' : results ? 'Results ready' : 'Ready to scan';
+    if (label) label.textContent = state.isImporting ? 'Reading metadata' : state.isScanning ? (state.pendingScan ? 'Checking ownership' : 'Scanning licenses') : state.isCleaning ? 'Cleanup in progress' : state.requiresRescan ? 'New scan required' : state.pendingScan ? 'Ownership check needed' : results ? 'Results ready' : 'Ready to scan';
     const summary = document.getElementById('scan-summary');
     if (summary) summary.textContent = state.scanSummary
-        ? `${state.scanSummary.complete ? 'Full scan' : 'Partial scan'} · ${state.scanSummary.pages} ${state.scanSummary.pages === 1 ? 'page' : 'pages'} · ${state.scannedLicenses.length} ${state.scannedLicenses.length === 1 ? 'match' : 'matches'}`
+        ? `${state.scanSummary.complete ? 'Full scan' : 'Partial scan'} · ${state.scanSummary.pages} ${state.scanSummary.pages === 1 ? 'page' : 'pages'} · ${describeOwnership(state.scanSummary)}`
         : state.pendingScan ? `${state.pendingScan.stats.pages} ${state.pendingScan.stats.pages === 1 ? 'page' : 'pages'} collected · ownership not verified` : 'Review every selection before removal.';
     const review = document.getElementById('review-results-button');
-    if (review) { review.hidden = !results; review.disabled = busy; }
+    if (review) { review.hidden = !results; review.disabled = busy; review.textContent = state.requiresRescan ? 'Inspect collected data' : 'Review results'; }
     const retry = document.getElementById('retry-ownership-button');
-    if (retry) { retry.hidden = !state.pendingScan; retry.disabled = busy; }
+    if (retry) {
+        retry.hidden = state.requiresRescan || (!state.pendingScan && !state.collectedScan?.licenses.length);
+        retry.disabled = busy;
+        retry.textContent = state.pendingScan?.summary.error && !state.pendingScan.recoveryAccepted ? 'Use completed pages' : 'Retry ownership check';
+    }
     document.getElementById('scan-button')?.classList.toggle('slc-primary', !state.pendingScan);
     const badge = document.getElementById('metadata-badge');
     if (badge) { badge.textContent = state.isImporting ? 'Reading…' : state.metadata ? 'Loaded' : 'Required'; badge.dataset.ready = String(Boolean(state.metadata)); }
@@ -114,7 +118,8 @@ const init = () => {
     const scan = createButton('scan-button', 'Scan licenses', 'Scan from the first license page', scanAllPages);
     scan.classList.add('slc-primary');
     const review = createButton('review-results-button', 'Review results', 'Reopen collected results without scanning again', () => {
-        if (state.scanContext && state.scanContext === scanContext()) showReviewModal();
+        if (state.requiresRescan) showScanDiagnostics();
+        else if (state.scanContext && state.scanContext === scanContext()) showReviewModal();
     });
     review.hidden = true;
     const retry = createButton('retry-ownership-button', 'Retry ownership check', 'Verify the collected pages without scanning them again', retryPendingScan);

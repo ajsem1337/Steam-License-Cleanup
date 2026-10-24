@@ -88,8 +88,14 @@ const showModal = (title, content, buttons, isClosable = true) => {
             event.preventDefault();
             modalOverlay.closeDialog();
         } else if (event.key === 'Tab') {
-            const controls = [...modalOverlay.querySelectorAll('button, input, select, textarea, a[href]')]
-                .filter(element => !element.disabled && !element.closest('[hidden]') && element.type !== 'hidden');
+            const controls = [...modalOverlay.querySelectorAll('button, input, select, textarea, a[href], summary, [tabindex]:not([tabindex="-1"])')]
+                .filter(element => {
+                    if (element.disabled || element.closest('[hidden], [inert]') || element.type === 'hidden') return false;
+                    for (let parent = element.parentElement; parent && parent !== modalOverlay; parent = parent.parentElement) {
+                        if (parent.matches('details:not([open])') && !parent.querySelector(':scope > summary')?.contains(element)) return false;
+                    }
+                    return true;
+                });
             const first = controls[0], last = controls.at(-1);
             if (!first) { event.preventDefault(); modalContent.focus(); }
             else if (event.shiftKey && (document.activeElement === first || document.activeElement === modalContent)) {
@@ -117,11 +123,12 @@ const showWorkingModal = (title, initialMessage) => {
 };
 
 const createScanDialog = (onFinish, onDiscard) => {
-    const modal = showModal('Scanning your licenses', `<p>Keep scanning, or review what has been collected so far.</p>
-        <div class="slc-scan-stats"><div><strong id="scan-page-count">0</strong><span>pages scanned</span></div><div><strong id="scan-match-count">0</strong><span>matches found</span></div></div>
+    const modal = showModal('Scanning your licenses', `<p id="scan-phase-description">Keep scanning, or review what has been collected so far.</p>
+        <div class="slc-scan-stats" id="scan-collection-stats"><div><strong id="scan-page-count">0</strong><span>pages scanned</span></div><div><strong id="scan-match-count">0</strong><span>candidates found</span></div></div>
+        <div id="scan-verification-stats" hidden></div>
         <div class="slc-scan-track" aria-hidden="true"><span></span></div>
         <p id="working-status" role="status" aria-live="polite">Starting scan…</p>
-        <p class="slc-fineprint">Collected results still go through an ownership check before review.</p>`, [], false);
+        <p class="slc-fineprint">Candidates already match your filters. Only those confirmed as owned by Steam will be available for removal.</p>`, [], false);
     modal.querySelector('.modal-content').classList.add('slc-scan-dialog');
     const finishButton = createButton('finish-scan-button', 'Use collected results', 'Stop collecting pages and verify the completed results', onFinish);
     finishButton.classList.add('slc-primary');
@@ -133,24 +140,101 @@ const createScanDialog = (onFinish, onDiscard) => {
         updateCounts: (pages, matches) => {
             modal.querySelector('#scan-page-count').textContent = String(pages);
             modal.querySelector('#scan-match-count').textContent = String(matches);
+        },
+        beginVerification: (pages, candidates) => {
+            modal.dataset.phase = 'ownership';
+            modal.querySelector('h2').textContent = 'Checking collected licenses';
+            modal.querySelector('#scan-phase-description').textContent = `Collection finished: ${pages} completed ${pages === 1 ? 'page' : 'pages'}. Checking which candidates Steam confirms as owned.`;
+            modal.querySelector('#scan-collection-stats').hidden = true;
+            const stats = modal.querySelector('#scan-verification-stats');
+            stats.hidden = false;
+            stats.innerHTML = ownershipBalanceHTML({ found: candidates });
+            modal.querySelector('#working-status').textContent = 'Checking current ownership with Steam…';
+            finishButton.disabled = true;
         }
     };
 };
 
-const exportRemovedLicenses = () => {
-    const report = [
-        'Steam License Cleanup 2.0 — cleanup report', state.cleanupStatus,
-        describeScan(state.scanSummary),
-        '', 'Confirmed removals:', ...state.removedDetails,
-        '', 'Duplicate requests skipped (not confirmed removed in this run):', ...state.skippedDetails,
-        '', 'Packages no longer owned (no further removal requests after ownership check):', ...state.notOwnedDetails
+const exportRemovedLicenses = (report = state.cleanupReport) => {
+    if (!report) return;
+    const text = [
+        'Steam License Cleanup 2.0 — cleanup report', report.status,
+        `This cleanup run: ${report.removed.length} confirmed removals.`,
+        describeScan(report.summary),
+        describeOwnership(report.summary),
+        '', 'Confirmed removals:', ...report.removed,
+        '', 'Duplicate requests skipped (not confirmed removed in this run):', ...report.skipped,
+        '', 'Packages no longer owned (no further removal requests after ownership check):', ...report.notOwned
     ].join('\n');
-    downloadText(`steam_removed_licenses_${new Date().toISOString().slice(0, 10)}.txt`, report);
+    downloadText(`steam_removed_licenses_${new Date().toISOString().slice(0, 10)}.txt`, text);
 };
 
 const describeScan = summary => summary
-    ? `${summary.complete ? 'Full' : 'Partial'} scan: ${summary.pages} completed ${summary.pages === 1 ? 'page' : 'pages'}.${summary.complete ? '' : ' Stopped at your request; unscanned pages are not included.'}`
+    ? `${summary.complete ? 'Full' : 'Partial'} scan: ${summary.pages} completed ${summary.pages === 1 ? 'page' : 'pages'}.${summary.complete ? '' : summary.error ? ` Stopped after a page error: ${summary.error} Unscanned pages are not included.` : ' Stopped at your request; unscanned pages are not included.'}`
     : 'No completed scan.';
+
+const ownershipExplanation = 'Only candidates with current ownership confirmation are available for removal. Missing IDs in Steam\'s rgOwnedPackages response may represent inactive licenses or an incomplete ownership response. Collected data stays in this tab for inspection; confirmed removals and skipped entries have separate statuses.';
+
+const describeOwnership = summary => summary
+    ? `${summary.found} candidates collected → ${summary.confirmed} ownership confirmed → ${summary.unconfirmed} without ownership confirmation.${summary.removed ? ` ${summary.removed} removals confirmed in this tab (not queued again).` : ''}${summary.needsRescan ? ' New scan required before removal.' : ''}`
+    : 'Ownership not verified.';
+
+const ownershipBalanceHTML = summary => `<div class="slc-scan-stats slc-ownership-balance ${summary.removed ? 'slc-with-removals' : ''}" role="group" aria-label="Candidate ownership balance">
+    <div><strong>${summary.found}</strong><span>candidates collected</span></div>
+    <div><strong>${summary.confirmed ?? '…'}</strong><span>ownership confirmed</span></div>
+    <div><strong>${summary.unconfirmed ?? '…'}</strong><span>without ownership confirmation</span></div>
+    ${summary.removed ? `<div><strong>${summary.removed}</strong><span>removals confirmed in this tab</span></div>` : ''}
+    </div>`;
+
+const candidateOwnership = license => {
+    const outcome = state.collectedScan?.outcomes.get(license.packageId);
+    if (outcome) return `${outcome.status === 'removed' ? 'Removed' : outcome.status === 'skipped' ? 'Skipped' : 'Uncertain result'}: ${outcome.reason}`;
+    if (state.requiresRescan) return 'Awaiting a new scan after cleanup stopped; removal unavailable';
+    return !state.scanSummary ? 'Ownership not verified; removal unavailable'
+    : state.scanStats.unconfirmed.has(license.packageId)
+        ? 'Not listed in Steam\'s ownership response; removal unavailable'
+        : 'Pending review/removal: Ownership confirmed at last scan check';
+};
+
+const exportScanDiagnostics = () => {
+    const snapshot = state.pendingScan || state.collectedScan;
+    if (!snapshot) return;
+    downloadText(`steam_license_candidates_${new Date().toISOString().slice(0, 10)}.txt`, [
+        'Steam License Cleanup — collected candidates and cleanup outcomes; diagnostic report, not a removal selection',
+        describeScan(snapshot.summary), describeOwnership(state.scanSummary),
+        state.scanSummary ? `Steam ownership response: ${state.scanSummary.ownedPackages} distinct package IDs (at scan verification).` : 'Ownership check needed.',
+        ownershipExplanation, '',
+        ...snapshot.licenses.map(license => `${license.details} — ${candidateOwnership(license)}`),
+        '', 'Metadata rejects (not part of the candidate ownership balance):',
+        ...[...snapshot.stats.unknownDetails.values()].map(item => `${item.name} (Package ID: ${item.packageId}) — ${item.reason}`)
+    ].join('\n'));
+};
+
+const showScanDiagnostics = () => {
+    const snapshot = state.pendingScan || state.collectedScan;
+    if (!snapshot) return;
+    showModal('Collected candidates · ownership details', `
+        <p>${escapeHTML(describeScan(snapshot.summary))}</p>
+        ${ownershipBalanceHTML(state.scanSummary || { found: snapshot.licenses.length })}
+        ${state.requiresRescan ? '<p role="alert">Cleanup stopped. A new scan is required before any further removal; these entries are diagnostic only.</p>' : ''}
+        <p>${escapeHTML(ownershipExplanation)}</p>
+        <p>These are diagnostic entries, not a removal selection.</p>
+        <ul class="slc-candidate-details">${snapshot.licenses.map(license => `<li><strong>${escapeHTML(license.name)}</strong>
+            <span>Package ID: ${license.packageId} · ${escapeHTML(candidateOwnership(license))}</span></li>`).join('')}</ul>`, [
+        { id: 'export-candidates-button', text: 'Export all candidates', onClick: exportScanDiagnostics },
+        ...(snapshot.stats.unknown.size ? [{ id: 'inspect-metadata-button', text: 'Inspect missing metadata', onClick: showMetadataDiagnostics }] : [])
+    ]);
+};
+
+const showMetadataDiagnostics = () => {
+    const snapshot = state.pendingScan || state.collectedScan;
+    if (!snapshot) return;
+    showModal('Missing or ambiguous metadata', `<p>These packages were excluded before counting candidates. They cannot be selected for removal.</p>
+        <ul class="slc-candidate-details">${[...snapshot.stats.unknownDetails.values()].map(item => `<li><strong>${escapeHTML(item.name)}</strong>
+        <span>Package ID: ${item.packageId} · ${escapeHTML(item.reason)}</span></li>`).join('')}</ul>`, [
+        { id: 'export-candidates-button', text: 'Export diagnostic report', onClick: exportScanDiagnostics }
+    ]);
+};
 
 const createInlineOptions = () => {
     const options = document.createElement('div');
@@ -207,6 +291,7 @@ const updateRemovalDelay = () => {
 };
 
 const showReviewModal = () => {
+    if (state.requiresRescan) { showScanDiagnostics(); return; }
     const licenses = [...state.scannedLicenses];
     const profile = state.settings.profile;
     const summary = state.scanSummary;
@@ -216,9 +301,21 @@ const showReviewModal = () => {
     const verificationSummary = state.settings.verifiedDemosOnly
         ? `Verified against imported Steam cache. Skipped ${state.scanStats.other.size} packages containing non-demo apps and ${state.scanStats.unknown.size} packages with missing metadata. Missing metadata never qualifies a package for removal.`
         : 'Name-filter mode: application types have NOT been verified.';
-    const ownershipSummary = `Current ownership checked with Steam. Skipped ${state.scanStats.notOwned.size} packages not currently owned.`;
+    const ownershipSummary = describeOwnership(summary);
+    const ownershipDetails = `${ownershipBalanceHTML(summary)}<p>${escapeHTML(ownershipExplanation)}</p>`;
     if (licenses.length === 0) {
-        showInfoModal(partial ? 'Partial Scan' : 'Scan Complete', `${escapeHTML(scopeLabel)} No removable licenses matching your criteria were found. ${ownershipSummary} ${verificationSummary}`);
+        const message = summary.removed || state.collectedScan?.outcomes.size
+            ? `No confirmed candidates remain available for removal. ${summary.removed || 0} removals were confirmed in this tab; other unavailable entries were skipped or lack ownership confirmation. See the diagnostic report for each entry's status.`
+            : summary.found
+            ? 'Candidates were collected, but Steam did not confirm ownership of any of them. They have been kept for inspection and another ownership check. No licenses were removed.'
+            : 'No removable licenses matching your criteria were found on the completed pages.';
+        showModal(partial ? 'Partial Scan' : 'Scan Complete', `<p>${escapeHTML(scopeLabel)}</p><p>${message}</p>
+            ${ownershipDetails}<p>${escapeHTML(verificationSummary)}</p>`, summary.found || state.scanStats.unknown.size ? [
+            { id: 'inspect-candidates-button', text: 'Inspect candidates', onClick: showScanDiagnostics },
+            { id: 'export-all-candidates-button', text: 'Export diagnostic report (all candidates)', onClick: exportScanDiagnostics },
+            ...(state.scanStats.unknown.size ? [{ id: 'inspect-metadata-button', text: 'Inspect missing metadata', onClick: showMetadataDiagnostics }] : []),
+            ...(summary.found ? [{ id: 'retry-collected-ownership', text: 'Retry ownership check', closes: true, onClick: retryPendingScan }] : [])
+        ] : []);
         return;
     }
     const listItems = licenses.map((lic, index) =>
@@ -231,9 +328,10 @@ const showReviewModal = () => {
     ).join('');
     const content = `
         <div class="slc-scan-scope ${partial ? 'slc-partial' : ''}" ${partial ? 'id="partial-scan-notice"' : ''}>
-            <strong>${partial ? 'Partial scan' : 'Full scan'} · ${licenses.length} matching licenses</strong>
+            <strong>${partial ? 'Partial scan' : 'Full scan'} · ${licenses.length} ownership-confirmed licenses available</strong>
             <p>${escapeHTML(scopeLabel)}</p>
         </div>
+        ${ownershipDetails}
         ${selectByDefault ? '' : '<p>No inclusion filter is active. Select the licenses you want to remove.</p>'}
         <details class="slc-scan-details"><summary>${escapeHTML(PROFILES[profile].label)} · Scan details</summary><p>${ownershipSummary}</p><p>${verificationSummary}</p></details>
         <div class="review-controls">
@@ -254,13 +352,20 @@ const showReviewModal = () => {
         text: 'Export selected', id: 'export-review-button',
         onClick: () => downloadText(`steam_license_review_${new Date().toISOString().slice(0, 10)}.txt`, [
             'Steam License Cleanup 2.0 — review only; no removal confirmed',
-            PROFILES[profile].label, scopeLabel, verificationSummary, '', ...selected().map(license => license.details)
+            PROFILES[profile].label, scopeLabel, ownershipSummary, `Selected entries in this export: ${selected().length}.`, verificationSummary, '', ...selected().map(license => license.details)
         ].join('\n'))
-    }, {
+    }, { id: 'export-all-candidates-button', text: 'Export diagnostic report (all candidates)', onClick: exportScanDiagnostics }, {
         text: 'Remove Selected (0)', id: 'review-proceed-button', closes: true,
         onClick: () => { const items = selected(); if (items.length) showConfirmModal(items); }
     }];
     modal = showModal('Review Licenses to Remove', content, buttons);
+    const details = modal.querySelector('.slc-scan-details');
+    if (state.scanStats.unknown.size) details.appendChild(createButton('inspect-metadata-button', 'Inspect missing metadata', 'See the exact metadata rejection reasons', showMetadataDiagnostics));
+    details.appendChild(createButton('inspect-candidates-button', 'Inspect all candidates', 'Inspect ownership status and export all collected candidates', showScanDiagnostics));
+    details.appendChild(createButton('retry-collected-ownership', 'Retry ownership check', 'Recheck collected candidates without scanning the pages again', () => {
+        modal.closeDialog();
+        retryPendingScan();
+    }));
     const checkboxes = [...modal.querySelectorAll('.license-checkbox')];
     const rows = [...modal.querySelectorAll('#review-list li')];
     const updateCount = () => {
@@ -309,6 +414,7 @@ const showConfirmModal = (selectedLicenses) => {
 };
 
 const showSummaryModal = () => {
+    const report = state.cleanupReport;
     const listItems = state.removedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join("");
     const skippedItems = state.skippedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join('');
     const notOwnedItems = state.notOwnedDetails.map(d => `<li>${escapeHTML(d)}</li>`).join('');
@@ -320,7 +426,7 @@ const showSummaryModal = () => {
         text: "Export List",
         closes: false,
         id: 'export-button',
-        onClick: exportRemovedLicenses
+        onClick: () => exportRemovedLicenses(report)
     }, {
         text: "Refresh Page",
         closes: true,
@@ -333,7 +439,7 @@ const showSummaryModal = () => {
 };
 
 const updateUICleanupFinished = () => {
-    document.querySelector(".progress-bar-container")?.remove();
+    document.querySelector("#cleanup-progress-host .progress-bar-container")?.remove();
     document.getElementById("cancel-button")?.remove();
     document.getElementById('cleanup-progress-host').hidden = true;
     setControlsDisabled(false);

@@ -310,7 +310,7 @@ test('date filtering includes both boundary dates in UTC', async t => {
 });
 
 for (const failure of ['http', 'missing-table', 'loop', 'external-link']) {
-    test(`scan failure (${failure}) never offers partial results for deletion`, async t => {
+    test(`scan failure (${failure}) never enables partial deletion automatically`, async t => {
         const app = await setup(t, (request, requests) => {
             if (failure === 'external-link') return new Response(page([license(1, 'Game Demo')], 'https://example.com/account/licenses/'));
             if (failure === 'loop') return new Response(page([license(1, 'Game Demo')], '/account/licenses/?l=english'));
@@ -434,7 +434,7 @@ test('current SubID ownership excludes the old Wednesdays demo while preserving 
     assert.equal(app.document.querySelectorAll('.license-checkbox').length, 1);
     assert.match(app.document.querySelector('#review-list').textContent, /Owned Trial/);
     assert.doesNotMatch(app.document.querySelector('#review-list').textContent, /Wednesdays/);
-    assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages not currently owned/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /1 without ownership confirmation/);
     assert.equal(app.ownershipRequests[0].cache, 'no-store');
     app.remove();
     await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
@@ -836,6 +836,7 @@ test('exporting the review includes selected hidden rows and never removes anyth
         reader.readAsText(exported);
     });
     assert.match(text, /review only; no removal confirmed/);
+    assert.match(text, /2 candidates collected → 2 ownership confirmed → 0 without ownership confirmation/);
     assert.match(text, /First Demo/); assert.match(text, /Second Demo/);
     assert.equal(app.requests.filter(request => request.method).length, 0);
 });
@@ -1071,7 +1072,7 @@ test('stopping page collection aborts the pending page and permits removal only 
     assert.equal(app.ownershipRequests[0].signal.aborted, false, 'ownership uses a separate signal from page collection');
     assert.deepEqual(reviewIds(app), ['1']);
     assert.match(app.document.getElementById('partial-scan-notice').textContent, /Partial scan.*1 completed page.*unscanned pages are not included/s);
-    assert.match(app.document.getElementById('scan-summary').textContent, /Partial scan.*1 page.*1 match/);
+    assert.match(app.document.getElementById('scan-summary').textContent, /Partial scan.*1 page.*1 ownership confirmed/);
     assert.equal(app.requests.filter(request => request.method).length, 0);
     app.document.getElementById('review-proceed-button').click();
     assert.match(app.document.querySelector('.modal-body').textContent, /Partial scan/);
@@ -1187,7 +1188,7 @@ test('verified demos keep type and ownership requirements when the scan stops ea
     await useCollectedResults(app);
     assert.deepEqual(reviewIds(app), ['1']);
     assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages containing non-demo apps and 1 packages with missing metadata/);
-    assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages not currently owned/);
+    assert.match(app.document.querySelector('.modal-body').textContent, /1 without ownership confirmation/);
 });
 
 test('partial review export explicitly records its scan coverage', async t => {
@@ -1261,7 +1262,7 @@ for (const ids of [[0, 1], ['0', '1'], [0, -1, 4294967295, 4294967296, 1], ['-1'
         app.setOwnership(() => new Response(JSON.stringify({ rgOwnedPackages: ids })));
         await app.scan();
         assert.deepEqual(reviewIds(app), ['1']);
-        assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+        assert.equal(app.document.getElementById('retry-ownership-button').hidden, false);
         app.remove();
         await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
         assert.deepEqual(app.requests.filter(request => request.method).map(request => request.body.get('packageid')), ['1']);
@@ -1330,7 +1331,7 @@ test('a stopped scan retries ownership without reading the collected pages again
     assert.ok(app.document.getElementById('partial-scan-notice'));
     assert.equal(app.requests.length, pageRequests);
     assert.equal(app.ownershipRequests.length, 2);
-    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, false);
     assert.equal(app.requests.filter(request => request.method).length, 0);
 });
 
@@ -1391,4 +1392,534 @@ test('discarding a pending ownership retry clears its collected snapshot', async
     assert.equal(app.document.getElementById('review-results-button').hidden, true);
     assert.equal(app.document.getElementById('review-proceed-button'), null);
     assert.equal(app.requests.length, 1);
+});
+
+const balanceCounts = app => [...app.document.querySelectorAll('.modal-overlay:last-child .slc-ownership-balance strong')]
+    .map(element => element.textContent);
+
+test('269 pages explain the reduction from 1200 candidates to 495 confirmed licenses', async t => {
+    let nextId = 1;
+    const pages = Array.from({ length: 269 }, (_, index) => page(
+        Array.from({ length: index < 124 ? 5 : 4 }, () => license(nextId++, 'Sample Demo')),
+        index < 268 ? `?offset=${index + 1}` : null
+    ));
+    const app = await setup(t, (request, requests) => new Response(pages[requests.length - 1]));
+    app.setOwnership(() => {
+        assert.equal(app.document.getElementById('scan-page-count').textContent, '269');
+        assert.equal(app.document.getElementById('scan-match-count').textContent, '1200');
+        assert.equal(app.document.querySelector('.slc-dialog').dataset.phase, 'ownership');
+        assert.equal(app.document.getElementById('scan-collection-stats').hidden, true);
+        assert.equal(app.document.getElementById('scan-verification-stats').hidden, false);
+        assert.deepEqual(balanceCounts(app), ['1200', '…', '…']);
+        assert.equal(app.document.getElementById('finish-scan-button').disabled, true);
+        return new Response(JSON.stringify({ rgOwnedPackages: Array.from({ length: 495 }, (_, i) => i + 1) }));
+    });
+    await app.scan();
+    assert.equal(app.requests.length, 269);
+    assert.equal(reviewIds(app).length, 495);
+    assert.deepEqual(balanceCounts(app), ['1200', '495', '705']);
+    assert.match(app.document.getElementById('scan-summary').textContent, /1200 candidates collected → 495 ownership confirmed → 705 without ownership confirmation/);
+    assert.doesNotMatch(app.document.querySelector('.modal-body').textContent, /packages not currently owned/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+test('scanner labels candidates and does not repeat the page number in its reading or rate-limit status', async t => {
+    const app = await beginStoppableScan(t, [license(1, 'Collected Demo')]);
+    assert.match(app.document.getElementById('scan-collection-stats').textContent, /candidates found/);
+    assert.equal(app.document.getElementById('working-status').textContent, 'Reading licenses…');
+    app.document.getElementById('cancel-scan-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Scan Cancelled');
+
+    const limited = await setup(t, () => new Response('', { status: 429 }));
+    limited.document.getElementById('scan-button').click();
+    await until(() => limited.timers.some(timer => timer.active && timer.delay === 30000));
+    assert.match(limited.document.getElementById('working-status').textContent, /retrying in 30s/);
+    assert.doesNotMatch(limited.document.getElementById('working-status').textContent, /page/i);
+    limited.document.getElementById('cancel-scan-button').click();
+    await until(() => limited.document.querySelector('.modal-content h2')?.textContent === 'Scan Cancelled');
+});
+
+for (const partial of [false, true]) {
+    test(`${partial ? 'partial' : 'full'} scan retains candidates after zero ownership overlap and recovers without scanning again`, async t => {
+        const rows = [license(1, 'First Demo'), license(2, 'Second Demo')];
+        const app = partial ? await beginStoppableScan(t, rows)
+            : await setup(t, () => new Response(page(rows)));
+        app.setOwnership(() => new Response('{"rgOwnedPackages":[999]}'));
+        if (partial) await useCollectedResults(app);
+        else await app.scan();
+        const pageRequests = app.requests.length;
+        assert.deepEqual(balanceCounts(app), ['2', '0', '2']);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Steam did not confirm ownership of any of them/);
+        assert.doesNotMatch(app.document.querySelector('.modal-body').textContent, /No removable licenses matching/);
+        assert.equal(app.document.getElementById('review-proceed-button'), null);
+        assert.equal(app.document.getElementById('review-results-button').hidden, false);
+        assert.equal(app.document.getElementById('retry-ownership-button').hidden, false);
+        app.document.getElementById('modal-close').click();
+        app.document.getElementById('review-results-button').click();
+        assert.deepEqual(balanceCounts(app), ['2', '0', '2']);
+        app.setOwnership(() => new Response('{"rgOwnedPackages":[1,2,999]}'));
+        app.document.getElementById('retry-collected-ownership').click();
+        await until(() => app.document.getElementById('review-proceed-button'));
+        assert.deepEqual(reviewIds(app), ['1', '2']);
+        assert.deepEqual(balanceCounts(app), ['2', '2', '0']);
+        assert.equal(Boolean(app.document.getElementById('partial-scan-notice')), partial);
+        assert.equal(app.requests.length, pageRequests);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('ownership retries recompute the candidate balance without counting metadata rejects or retaining old classifications', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'First Trial'), license(2, 'Second Trial'), license(3, 'Full Game'),
+        license(4, 'Unknown Trial'), license(5, 'Excluded by app name')
+    ])), { verifiedDemosOnly: true, exclusions: ['keep'] });
+    await importMetadata(app, metadataFiles([
+        { id: 10, type: 'Demo' }, { id: 20, type: 'Demo' }, { id: 30, type: 'Game' },
+        { id: 50, name: 'Keep this app', type: 'Demo' }
+    ], [{ id: 1, apps: [10] }, { id: 2, apps: [20] }, { id: 3, apps: [30] }, { id: 5, apps: [50] }]));
+    let owned = [1, 999];
+    app.setOwnership(() => new Response(JSON.stringify({ rgOwnedPackages: owned })));
+    await app.scan();
+    assert.deepEqual(reviewIds(app), ['1']);
+    assert.deepEqual(balanceCounts(app), ['2', '1', '1']);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages containing non-demo apps and 1 packages with missing metadata/);
+    for (const ids of [[2, 999], [1, 2, 999], [1, 999]]) {
+        owned = ids;
+        app.document.getElementById('retry-collected-ownership').click();
+        await until(() => app.document.getElementById('review-proceed-button'));
+        assert.deepEqual(reviewIds(app), ids.filter(id => id !== 999).map(String));
+        assert.deepEqual(balanceCounts(app), ['2', String(ids.length - 1), String(3 - ids.length)]);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Skipped 1 packages containing non-demo apps and 1 packages with missing metadata/);
+    }
+    assert.equal(app.requests.length, 1);
+});
+
+test('inspection and export preserve all candidates, safe names, package IDs and ownership reasons after zero matches', async t => {
+    const app = await beginStoppableScan(t, [license(1, '<img src=x> Demo'), license(2, 'Other Demo')]);
+    app.setOwnership(() => new Response('{"rgOwnedPackages":[999]}'));
+    await useCollectedResults(app);
+    app.document.getElementById('inspect-candidates-button').click();
+    const diagnostic = app.document.querySelector('.modal-overlay:last-child');
+    assert.equal(diagnostic.querySelector('img'), null);
+    assert.equal(diagnostic.querySelectorAll('.slc-candidate-details li').length, 2);
+    assert.match(diagnostic.textContent, /<img src=x> Demo.*Package ID: 1.*Not listed in Steam's ownership response/s);
+    assert.equal(diagnostic.querySelector('.license-checkbox'), null);
+    let exported;
+    app.window.URL.createObjectURL = blob => { exported = blob; return 'blob:test'; };
+    app.window.URL.revokeObjectURL = () => {};
+    app.window.HTMLAnchorElement.prototype.click = () => {};
+    diagnostic.querySelector('#export-candidates-button').click();
+    const text = await new Promise((resolve, reject) => {
+        const reader = new app.window.FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(exported);
+    });
+    assert.match(text, /Partial scan: 1 completed page/);
+    assert.match(text, /2 candidates collected → 0 ownership confirmed → 2 without ownership confirmation/);
+    assert.match(text, /Steam ownership response: 1 distinct package IDs/);
+    assert.match(text, /Package ID: 1.*Not listed in Steam's ownership response/);
+    assert.match(text, /Package ID: 2.*Not listed in Steam's ownership response/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+test('failed rechecking of a successful scan revokes the old actionable results but retains candidates for recovery', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Collected Demo')])));
+    await app.scan();
+    app.document.getElementById('review-proceed-button').click();
+    const oldConfirmation = [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Yes, Clean Up');
+    app.setOwnership(() => new Response('', { status: 503 }));
+    app.document.getElementById('retry-ownership-button').click();
+    await until(() => app.document.getElementById('retry-ownership-check'));
+    assert.equal(app.document.getElementById('review-results-button').hidden, true);
+    oldConfirmation.click();
+    assert.match(app.document.body.textContent, /Scan Again/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+    app.setOwnership(() => new Response('{"rgOwnedPackages":[1]}'));
+    app.document.getElementById('retry-ownership-check').click();
+    await until(() => app.document.getElementById('review-proceed-button'));
+    assert.deepEqual(reviewIds(app), ['1']);
+    assert.equal(app.requests.length, 1);
+});
+
+test('failed ownership checks expose collected candidates as unverified, not as confirmed or absent from a successful response', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Collected Demo')])));
+    app.setOwnership(() => new Response('', { status: 503 }));
+    await app.scan();
+    app.document.getElementById('inspect-candidates-button').click();
+    const diagnostic = app.document.querySelector('.modal-overlay:last-child');
+    assert.deepEqual(balanceCounts(app), ['1', '…', '…']);
+    assert.match(diagnostic.querySelector('.slc-candidate-details').textContent, /Package ID: 1.*Ownership not verified; removal unavailable/);
+    assert.doesNotMatch(diagnostic.querySelector('.slc-candidate-details').textContent, /Ownership confirmed|Not listed/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+for (const change of ['profile', 'date', 'exclusions', 'metadata']) {
+    test(`changing ${change} clears retained zero-overlap candidates and prevents a stale retry`, async t => {
+        const app = await setup(t, () => new Response(page([license(1, 'Collected Demo')])));
+        app.setOwnership(() => new Response('{"rgOwnedPackages":[999]}'));
+        await app.scan();
+        const staleRetry = app.document.getElementById('retry-collected-ownership');
+        if (change === 'profile') chooseProfile(app, 'all');
+        if (change === 'date') {
+            const input = app.document.getElementById('start-date-input');
+            input.value = '2026-01-01';
+            input.dispatchEvent(new app.window.Event('change'));
+        }
+        if (change === 'exclusions') {
+            const input = app.document.getElementById('exclusions-textarea');
+            input.value = 'keep';
+            input.dispatchEvent(new app.window.Event('input'));
+        }
+        if (change === 'metadata') await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo' }], [{ id: 1, apps: [10] }]));
+        assert.equal(app.document.getElementById('review-results-button').hidden, true);
+        assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+        staleRetry.click();
+        assert.equal(app.ownershipRequests.length, 1);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('discarding an ownership recheck also clears the previously successful collected scan', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Collected Demo')])));
+    await app.scan();
+    app.document.getElementById('modal-close').click();
+    app.setOwnership(request => new Promise((resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+    }));
+    app.document.getElementById('retry-ownership-button').click();
+    await until(() => app.ownershipRequests.length === 2);
+    app.document.getElementById('cancel-scan-button').click();
+    await until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Scan Cancelled');
+    assert.equal(app.document.getElementById('review-results-button').hidden, true);
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    assert.equal(app.requests.length, 1);
+});
+
+test('workspace is centered and capped at Steam panel width while fitting narrower containers', async t => {
+    const app = await setup(t, () => new Response(page([])));
+    const panel = app.document.getElementById('cleanup-controls');
+    const style = app.window.getComputedStyle(panel);
+    assert.equal(style.width, '100%');
+    assert.equal(style.maxWidth, '940px');
+    assert.equal(style.boxSizing, 'border-box');
+    assert.equal(style.marginLeft, 'auto');
+    assert.equal(style.marginRight, 'auto');
+    assert.equal(style.marginBottom, '28px');
+});
+
+const cleanupFinished = app => until(() => app.document.querySelector('.modal-content h2')?.textContent === 'Cleanup Summary');
+const reopenReview = app => {
+    app.document.getElementById('modal-close').click();
+    app.document.getElementById('review-results-button').click();
+};
+const readExport = async (app, button) => {
+    let exported;
+    app.window.URL.createObjectURL = blob => { exported = blob; return 'blob:test'; };
+    app.window.URL.revokeObjectURL = () => {};
+    app.window.HTMLAnchorElement.prototype.click = () => {};
+    button.click();
+    assert.ok(exported, 'an export was produced');
+    return new Promise((resolve, reject) => {
+        const reader = new app.window.FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsText(exported);
+    });
+};
+
+test('reopening a fully cleaned scan reports confirmed removals instead of claiming no ownership or no removals', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page([license(1, 'Cleaned Demo')])));
+    await app.scan(); app.remove(); await cleanupFinished(app);
+    reopenReview(app);
+    assert.match(app.document.querySelector('.modal-body').textContent, /No confirmed candidates remain available.*1 removals were confirmed/s);
+    assert.doesNotMatch(app.document.querySelector('.modal-body').textContent, /Steam did not confirm ownership of any|No licenses were removed/);
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.deepEqual(balanceCounts(app), ['1', '0', '0', '1']);
+    const text = await readExport(app, app.document.getElementById('export-all-candidates-button'));
+    assert.match(text, /Package ID: 1.*Removed: Removal confirmed by Steam/);
+    app.document.getElementById('retry-collected-ownership').click();
+    await until(() => !app.document.getElementById('working-status'));
+    assert.deepEqual(balanceCounts(app), ['1', '0', '0', '1'], 'even stale positive ownership cannot queue a confirmed removal again');
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+});
+
+test('packages skipped after ownership changes are removed from the actionable review and retain their reason', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}')
+        : new Response(page([license(1, 'Removed Demo'), license(2, 'Skipped Demo')])));
+    app.setOwnership((request, requests) => new Response(JSON.stringify({ rgOwnedPackages: requests.length <= 2 ? [1, 2, 999] : [999] })));
+    await app.scan(); app.remove(); await cleanupFinished(app);
+    reopenReview(app);
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.deepEqual(balanceCounts(app), ['2', '0', '1', '1']);
+    const text = await readExport(app, app.document.getElementById('export-all-candidates-button'));
+    assert.match(text, /Package ID: 1.*Removed: Removal confirmed/);
+    assert.match(text, /Package ID: 2.*Skipped: Ownership no longer confirmed/);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+});
+
+test('a DuplicateRequest skipped after loss of ownership is not presented as removable again', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":29}') : new Response(page([license(1, 'Duplicate Demo')])));
+    app.window.console.warn = () => {};
+    app.setOwnership((request, requests) => new Response(JSON.stringify({ rgOwnedPackages: requests.length <= 2 ? [1, 999] : [999] })));
+    await app.scan(); app.remove(); await cleanupFinished(app);
+    reopenReview(app);
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.deepEqual(balanceCounts(app), ['1', '0', '1']);
+    const text = await readExport(app, app.document.getElementById('export-all-candidates-button'));
+    assert.match(text, /Skipped: DuplicateRequest \(29\); removal not confirmed/);
+});
+
+for (const failure of ['rejection', 'network', 'ownership']) {
+    test(`cleanup ${failure} revokes old selections and requires a new full scan while preserving diagnostics`, async t => {
+        let healthy = false;
+        const app = await setup(t, request => {
+            if (!request.method) return new Response(page([license(1, 'Retry Demo')]));
+            if (failure === 'network' && !healthy) throw new Error('Connection lost');
+            return new Response(JSON.stringify({ success: healthy ? 1 : 2 }));
+        });
+        app.setOwnership((request, requests) => failure === 'ownership' && requests.length > 1 && !healthy
+            ? new Response('', { status: 503 }) : new Response('{"rgOwnedPackages":[1,999]}'));
+        await app.scan();
+        app.document.getElementById('review-proceed-button').click();
+        const oldConfirmation = [...app.document.querySelectorAll('button')].find(button => button.textContent === 'Yes, Clean Up');
+        oldConfirmation.click();
+        await cleanupFinished(app);
+        const posts = app.requests.filter(request => request.method).length;
+        assert.equal(app.document.getElementById('workspace-status').textContent, 'New scan required');
+        assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+        oldConfirmation.click();
+        assert.equal(app.requests.filter(request => request.method).length, posts);
+        // Close both the fresh-scan warning and the cleanup summary.
+        app.document.querySelector('.modal-overlay:last-child #modal-close').click();
+        reopenReview(app);
+        assert.equal(app.document.getElementById('review-proceed-button'), null);
+        assert.match(app.document.querySelector('.modal-body').textContent, /A new scan is required/);
+        const text = await readExport(app, app.document.getElementById('export-candidates-button'));
+        assert.match(text, /New scan required before removal/);
+        assert.match(text, failure === 'ownership' ? /Awaiting a new scan/ : /Uncertain result: Removal not confirmed/);
+        const checks = app.ownershipRequests.length;
+        app.document.getElementById('retry-ownership-button').click();
+        assert.equal(app.ownershipRequests.length, checks, 'ownership-only retry cannot bypass the required scan');
+        app.document.getElementById('modal-close').click();
+        healthy = true;
+        await app.scan();
+        app.remove(); await cleanupFinished(app);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1/);
+        assert.equal(app.requests.filter(request => !request.method).length, 2);
+    });
+}
+
+test('cancellation after a confirmed removal preserves its status but blocks the rest until a new scan', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":1}')
+        : new Response(page([license(1, 'Removed Demo'), license(2, 'Waiting Demo')])), { removalDelay: 2000 });
+    await app.scan(); app.remove();
+    await until(() => app.timers.some(timer => timer.active && timer.delay === 2000));
+    app.document.getElementById('cancel-button').click();
+    await cleanupFinished(app);
+    const exportButton = app.document.getElementById('export-button');
+    const text = await readExport(app, exportButton);
+    assert.match(text, /Cleanup cancelled/);
+    assert.match(text, /Confirmed removals:\nRemoved Demo/);
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    reopenReview(app);
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    const diagnostic = await readExport(app, app.document.getElementById('export-candidates-button'));
+    assert.match(diagnostic, /Package ID: 1.*Removed: Removal confirmed/);
+    assert.match(diagnostic, /Package ID: 2.*Awaiting a new scan/);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+});
+
+for (const value of [[1], [], {}, true, false, null, undefined, 1.5, '01', '1e0', ' 1 ', -1]) {
+    test(`malformed removal result ${JSON.stringify(value)} never confirms a removal`, async t => {
+        const app = await setup(t, request => request.method ? new Response(JSON.stringify({ success: value }))
+            : new Response(page([license(1, 'Malformed Demo'), license(2, 'Queued Demo')])));
+        await app.scan(); app.remove(); await cleanupFinished(app);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Malformed removal result.*Successfully removed 0/s);
+        assert.equal(app.requests.filter(request => request.method).length, 1);
+        assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    });
+}
+
+test('numeric-string removal success is still accepted', async t => {
+    const app = await setup(t, request => request.method ? new Response('{"success":"1"}') : new Response(page([license(1, 'Valid Demo')])));
+    await app.scan(); app.remove(); await cleanupFinished(app);
+    assert.match(app.document.querySelector('.modal-body').textContent, /Successfully removed 1/);
+});
+
+test('review focus trapping includes visible summaries but excludes their collapsed descendants', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Keyboard Demo')])));
+    await app.scan();
+    const dialog = app.document.querySelector('[role="dialog"]');
+    const details = dialog.querySelector('details');
+    const summary = details.querySelector('summary');
+    const close = dialog.querySelector('#modal-close');
+    const tab = shiftKey => dialog.dispatchEvent(new app.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }));
+    assert.equal(details.open, false);
+    tab(false);
+    assert.equal(app.document.activeElement, summary);
+    tab(true);
+    assert.equal(app.document.activeElement, close);
+    close.focus(); tab(false);
+    assert.equal(app.document.activeElement, summary);
+    details.open = true;
+    close.focus(); tab(false);
+    assert.equal(app.document.activeElement, summary);
+    assert.notEqual(app.document.activeElement.id, 'inspect-candidates-button');
+});
+
+test('metadata diagnostics distinguish missing packages, ambiguous contents, missing apps and missing types', async t => {
+    const app = await setup(t, () => new Response(page([
+        license(1, 'Missing Package'), license(2, 'Empty Package'), license(3, '<img src=x> Missing App'),
+        license(4, 'Missing Type'), license(5, 'Valid Trial')
+    ])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([{ id: 40 }, { id: 50, type: 'Demo' }], [
+        { id: 2, apps: [] }, { id: 3, apps: [30] }, { id: 4, apps: [40] }, { id: 5, apps: [50] }
+    ]));
+    await app.scan();
+    assert.deepEqual(reviewIds(app), ['5']);
+    assert.deepEqual(balanceCounts(app), ['1', '1', '0']);
+    app.document.getElementById('inspect-metadata-button').click();
+    const diagnostic = app.document.querySelector('.modal-overlay:last-child');
+    assert.equal(diagnostic.querySelector('img'), null);
+    assert.equal(diagnostic.querySelectorAll('li').length, 4);
+    assert.match(diagnostic.textContent, /Package ID 1 missing from packageinfo.vdf/);
+    assert.match(diagnostic.textContent, /contents missing or ambiguous for Package ID 2/);
+    assert.match(diagnostic.textContent, /Applications missing from appinfo.vdf: 30/);
+    assert.match(diagnostic.textContent, /Application type missing or ambiguous for App IDs: 40/);
+    const text = await readExport(app, diagnostic.querySelector('#export-candidates-button'));
+    assert.match(text, /Metadata rejects \(not part of the candidate ownership balance\)/);
+    assert.match(text, /Package ID: 3.*Applications missing from appinfo.vdf: 30/);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+test('review offers separate exports for selected entries and diagnostics with all candidates', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Selected Demo'), license(2, 'Unconfirmed Demo')])));
+    app.setOwnership(() => new Response('{"rgOwnedPackages":[1,999]}'));
+    await app.scan();
+    const selected = await readExport(app, app.document.getElementById('export-review-button'));
+    assert.match(selected, /Selected entries in this export: 1/);
+    assert.match(selected, /Selected Demo/);
+    assert.doesNotMatch(selected, /Unconfirmed Demo/);
+    const all = await readExport(app, app.document.getElementById('export-all-candidates-button'));
+    assert.match(all, /Selected Demo/);
+    assert.match(all, /Unconfirmed Demo.*Not listed in Steam's ownership response/);
+});
+
+for (const failure of ['http', 'network', 'missing-table', 'bad-date']) {
+    test(`page ${failure} retains only completed pages and requires explicit acceptance and ownership before partial review`, async t => {
+        const app = await setup(t, (request, requests) => {
+            if (requests.length === 1) return new Response(page([license(1, 'Completed Demo')], '?offset=100'));
+            if (failure === 'network') throw new Error('Connection lost');
+            if (failure === 'missing-table') return new Response('<form>Sign in</form>');
+            if (failure === 'bad-date') return new Response(page([license(2, 'Uncommitted Demo'), license(3, 'Invalid Demo', 'unknown')]));
+            return new Response('', { status: 503 });
+        });
+        if (failure === 'bad-date') app.document.getElementById('start-date-input').value = '2026-01-01';
+        await app.scan();
+        assert.equal(app.document.querySelector('.modal-content h2').textContent, 'Scan Failed');
+        assert.equal(app.document.getElementById('review-proceed-button'), null);
+        assert.equal(app.ownershipRequests.length, 0);
+        assert.match(app.document.querySelector('.modal-body').textContent, /Kept 1 completed page with 1 candidate/);
+        app.document.getElementById('use-completed-pages').click();
+        await until(() => app.document.getElementById('review-proceed-button'));
+        assert.deepEqual(reviewIds(app), ['1']);
+        assert.deepEqual(balanceCounts(app), ['1', '1', '0']);
+        assert.match(app.document.getElementById('partial-scan-notice').textContent, /Stopped after a page error/);
+        assert.equal(app.ownershipRequests.length, 1);
+        assert.equal(app.requests.length, 2);
+        assert.equal(app.requests.filter(request => request.method).length, 0);
+    });
+}
+
+test('a page error cannot salvage an incomplete first page', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Uncommitted Demo'), license(2, 'Invalid Demo', 'unknown')])));
+    app.document.getElementById('start-date-input').value = '2026-01-01';
+    await app.scan();
+    assert.equal(app.document.getElementById('use-completed-pages'), null);
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    assert.equal(app.ownershipRequests.length, 0);
+});
+
+test('discarding collected pages after a page error clears recovery and diagnostic actions', async t => {
+    const app = await setup(t, (request, requests) => requests.length === 1
+        ? new Response(page([license(1, 'Completed Demo')], '?offset=100')) : new Response('', { status: 503 }));
+    await app.scan();
+    const recovery = app.document.getElementById('use-completed-pages');
+    app.document.getElementById('discard-collected-pages').click();
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    recovery.click();
+    assert.equal(app.ownershipRequests.length, 0);
+});
+
+test('an accepted recovered scan still cannot bypass failed ownership verification', async t => {
+    const app = await setup(t, (request, requests) => requests.length === 1
+        ? new Response(page([license(1, 'Completed Demo')], '?offset=100')) : new Response('', { status: 503 }));
+    app.setOwnership(() => new Response('', { status: 503 }));
+    await app.scan();
+    app.document.getElementById('use-completed-pages').click();
+    await until(() => app.document.getElementById('retry-ownership-check'));
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
+    assert.equal(app.requests.filter(request => request.method).length, 0);
+});
+
+test('cancelling an in-flight removal records an uncertain outcome and disables ownership-only retry', async t => {
+    const app = await setup(t, request => request.method ? new Promise((resolve, reject) => {
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+    }) : new Response(page([license(1, 'In Flight Demo')])));
+    await app.scan(); app.remove();
+    await until(() => app.requests.some(request => request.method));
+    app.document.getElementById('cancel-button').click();
+    await cleanupFinished(app);
+    reopenReview(app);
+    const text = await readExport(app, app.document.getElementById('export-candidates-button'));
+    assert.match(text, /Package ID: 1.*Uncertain result: Removal not confirmed/);
+    assert.match(text, /New scan required before removal/);
+    assert.equal(app.document.getElementById('retry-ownership-button').hidden, true);
+    assert.equal(app.requests.filter(request => request.method).length, 1);
+});
+
+test('cleanup report export remains tied to its run after another scan changes the workspace', async t => {
+    let rows = [license(1, 'Original Demo')];
+    const app = await setup(t, request => request.method ? new Response('{"success":1}') : new Response(page(rows)));
+    await app.scan(); app.remove(); await cleanupFinished(app);
+    const exportButton = app.document.getElementById('export-button');
+    app.document.getElementById('modal-close').click();
+    rows = [license(2, 'Different Demo'), license(3, 'Another Demo')];
+    await app.scan();
+    const text = await readExport(app, exportButton);
+    assert.match(text, /This cleanup run: 1 confirmed removals/);
+    assert.match(text, /1 candidates collected → 0 ownership confirmed/);
+    assert.match(text, /Confirmed removals:\nOriginal Demo/);
+    assert.doesNotMatch(text, /Different Demo|Another Demo|2 candidates collected/);
+});
+
+test('failed page metadata statistics are not committed into a recovered scan', async t => {
+    const app = await setup(t, (request, requests) => requests.length === 1
+        ? new Response(page([license(1, 'Completed Trial')], '?offset=100'))
+        : new Response(page([license(2, 'Uncommitted Unknown'), license(3, 'Invalid Trial', 'unknown')])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([{ id: 10, type: 'Demo' }, { id: 30, type: 'Demo' }], [
+        { id: 1, apps: [10] }, { id: 3, apps: [30] }
+    ]));
+    app.document.getElementById('start-date-input').value = '2026-01-01';
+    await app.scan();
+    app.document.getElementById('use-completed-pages').click();
+    await until(() => app.document.getElementById('review-proceed-button'));
+    assert.deepEqual(reviewIds(app), ['1']);
+    assert.match(app.document.querySelector('.modal-body').textContent, /0 packages with missing metadata/);
+    assert.equal(app.document.getElementById('inspect-metadata-button'), null);
+    const text = await readExport(app, app.document.getElementById('export-all-candidates-button'));
+    assert.doesNotMatch(text, /Uncommitted Unknown|Package ID: 2/);
+});
+
+test('a zero-candidate verified scan still exposes detailed metadata rejects without a pointless ownership-retry action', async t => {
+    const app = await setup(t, () => new Response(page([license(1, 'Unknown Trial')])), { verifiedDemosOnly: true });
+    await importMetadata(app, metadataFiles([{ id: 20, type: 'Demo' }], [{ id: 2, apps: [20] }]));
+    await app.scan();
+    assert.equal(app.document.getElementById('retry-collected-ownership'), null);
+    assert.equal(app.document.getElementById('review-results-button').hidden, false);
+    app.document.getElementById('inspect-metadata-button').click();
+    assert.match(app.document.querySelector('.modal-overlay:last-child').textContent, /Package ID 1 missing from packageinfo.vdf/);
+    assert.equal(app.document.getElementById('review-proceed-button'), null);
 });

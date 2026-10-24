@@ -176,12 +176,16 @@ const parsePackageCache = async (buffer) => {
 
 const verifyDemoPackage = (packageId) => {
     const appids = state.metadata?.packages.get(packageId);
-    if (!appids?.length) return { status: 'unknown', reason: 'Package contents unavailable' };
+    if (!appids) return { status: 'unknown', reason: `Package ID ${packageId} missing from packageinfo.vdf` };
+    if (!appids.length) return { status: 'unknown', reason: `Package contents missing or ambiguous for Package ID ${packageId}` };
     const apps = appids.map(id => ({ id, ...state.metadata.apps.get(id) }));
     if (apps.some(app => app.type && app.type !== 'demo')) {
         return { status: 'other', reason: 'Package contains a non-demo application' };
     }
-    if (apps.some(app => !app.type)) return { status: 'unknown', reason: 'Application type unavailable' };
+    const missingApps = appids.filter(id => !state.metadata.apps.has(id));
+    if (missingApps.length) return { status: 'unknown', reason: `Applications missing from appinfo.vdf: ${missingApps.join(', ')}` };
+    const missingTypes = apps.filter(app => !app.type).map(app => app.id);
+    if (missingTypes.length) return { status: 'unknown', reason: `Application type missing or ambiguous for App IDs: ${missingTypes.join(', ')}` };
     return { status: 'demo', apps };
 };
 

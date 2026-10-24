@@ -12,7 +12,7 @@ const addGlobalStyle = () => {
         }
         #cleanup-controls *, .slc-dialog * { box-sizing: border-box; }
         #cleanup-controls [hidden], .slc-dialog [hidden] { display: none !important; }
-        #cleanup-controls { background: #101a28; border: 1px solid #334358; border-radius: 16px; margin: 0 0 28px; overflow: hidden; text-align: left; box-shadow: 0 18px 50px #0003; }
+        #cleanup-controls { box-sizing: border-box; width: 100%; max-width: 940px; background: #101a28; border: 1px solid #334358; border-radius: 16px; margin: 0 auto 28px; overflow: hidden; text-align: left; box-shadow: 0 18px 50px #0003; }
         #cleanup-controls h2, #cleanup-controls h3, .slc-dialog h2 { color: var(--steam-white-text); font-weight: 650; line-height: 1.3; }
         #cleanup-controls p, .slc-dialog p { margin: 0 0 12px; }
         #cleanup-controls .slc-header { display: flex; gap: 20px; justify-content: space-between; align-items: center; padding: 26px 28px 22px; }
@@ -94,6 +94,13 @@ const addGlobalStyle = () => {
         .slc-dialog .slc-scan-stats > div { background: #0f1b2a; border: 1px solid var(--slc-border); border-radius: 9px; padding: 17px 20px; }
         .slc-dialog .slc-scan-stats strong { display: block; color: var(--steam-white-text); font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; }
         .slc-dialog .slc-scan-stats span { color: var(--slc-muted); font-size: 12px; }
+        .slc-dialog .slc-ownership-balance { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .slc-dialog .slc-ownership-balance.slc-with-removals { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .slc-dialog .slc-ownership-balance > div { padding: 13px; }
+        .slc-dialog .slc-ownership-balance strong { font-size: 26px; }
+        .slc-dialog .slc-candidate-details { padding-left: 20px; overflow-wrap: anywhere; }
+        .slc-dialog .slc-candidate-details li { margin: 10px 0; }
+        .slc-dialog .slc-candidate-details span { display: block; color: var(--slc-muted); font-size: 12px; }
         .slc-dialog .slc-scan-track { height: 4px; border-radius: 4px; background: #2a3a4f; overflow: hidden; }
         .slc-dialog .slc-scan-track span { display: block; width: 35%; height: 100%; background: var(--steam-blue); animation: slc-scanning 1.8s ease-in-out infinite alternate; }
         .slc-dialog #working-status { margin: 15px 0 9px; font-size: 13px; }
@@ -134,6 +141,7 @@ const addGlobalStyle = () => {
             .slc-dialog .review-controls { grid-template-columns: 1fr; }
             .slc-dialog #review-list .slc-badge { display: none; }
             .slc-dialog .slc-scan-stats > div { padding: 13px; }
+            .slc-dialog .slc-ownership-balance, .slc-dialog .slc-ownership-balance.slc-with-removals { grid-template-columns: 1fr; gap: 6px; }
             #cleanup-controls .slc-steps li { font-size: 11px; gap: 5px; }
             #cleanup-controls .slc-steps { gap: 10px; }
         }

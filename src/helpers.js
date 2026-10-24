@@ -20,6 +20,8 @@ const invalidateScan = () => {
     state.scanContext = null;
     state.scanSummary = null;
     state.pendingScan = null;
+    state.collectedScan = null;
+    state.requiresRescan = false;
     updateWorkspaceStatus();
 };
 

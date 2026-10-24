@@ -1,5 +1,20 @@
 # Changes
 
+## 2.0.1 — 2026-10-24
+
+- Track removed, skipped, pending, and uncertain candidate outcomes; remove processed entries from the actionable review and show accurate post-cleanup summaries.
+- Require a new scan after cleanup errors or cancellation while preserving diagnostic data and a run-specific cleanup report.
+- Reject malformed removal result values instead of coercing arrays, booleans, or other invalid types into success.
+- Fix dialog keyboard focus to include visible summaries and skip controls inside collapsed details.
+- Retain completed pages after page errors for explicit partial-scan recovery, without including incomplete-page candidates or statistics or bypassing ownership checks.
+- Add exact missing-metadata reasons and separate visible selected/diagnostic export actions, including selected-entry counts.
+- Center the workspace and cap its width at 940px to match Steam panels while fitting narrower webviews.
+- Distinguish candidates found during scanning from ownership-confirmed licenses, with an explicit ownership-checking phase and a balanced breakdown in the review and exports.
+- Remove the repeated page number from the scanner's reading and rate-limit status messages.
+- Keep collected candidates after successful ownership checks, including zero confirmed results; support rechecking without rescanning pages.
+- Add candidate inspection and diagnostic export with package IDs and ownership reasons, without making unconfirmed candidates removable.
+- Keep metadata rejections separate from the candidate ownership balance and recompute classifications on every ownership retry.
+
 ## 2.0.0 — 2026-10-23
 
 - Add cleanup profiles for verified demos, playtests and test versions, videos, soundtracks, custom name filters, and all removable licenses.

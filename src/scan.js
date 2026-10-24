@@ -1,5 +1,10 @@
 // --- CORE LOGIC: SCANNING & REMOVAL ---
-const parseTableForDetails = (tableElement) => {
+const createScanStats = () => ({
+    demo: new Set(), other: new Set(), unknown: new Set(), seen: new Set(),
+    unconfirmed: new Set(), unknownDetails: new Map(), pages: 0
+});
+
+const parseTableForDetails = (tableElement, stats) => {
     const foundLicenses = [];
     if (!tableElement) return foundLicenses;
 
@@ -57,11 +62,12 @@ const parseTableForDetails = (tableElement) => {
             }
             const packageId = steamId(packageIdMatch[1]);
             if (!packageId) throw new Error('Steam returned an invalid package ID.');
-            state.scanStats.seen.add(packageId);
+            stats.seen.add(packageId);
             let verification = '';
             if (state.settings.verifiedDemosOnly) {
                 const result = verifyDemoPackage(packageId);
-                state.scanStats[result.status].add(packageId);
+                stats[result.status].add(packageId);
+                if (result.status === 'unknown') stats.unknownDetails.set(packageId, { packageId, name: cellText, reason: result.reason });
                 if (result.status !== 'demo') continue;
                 if (exclusionRegex && result.apps.some(app => exclusionRegex.test(app.name || ''))) continue;
                 verification = ` [Verified from local Steam cache: ${result.apps.map(app => `${app.id} = Demo`).join(', ')}]`;
@@ -74,69 +80,93 @@ const parseTableForDetails = (tableElement) => {
 };
 
 
-// Keep collected pages separate from verified results. A failed ownership check
-// can be retried without making any page or removal requests.
-const verifyCollectedScan = async (snapshot, signal, statusElement) => {
+// Never overwrite the collected candidates with the ownership-filtered subset.
+// Both failed and successful checks (including zero matches) can be repeated.
+const verifyCollectedScan = async (snapshot, signal, dialog) => {
     if (state.pendingScan !== snapshot || snapshot.context !== scanContext()) {
         throw new Error('Filters or metadata changed. Scan again before reviewing licenses.');
     }
-    statusElement.textContent = 'Checking current ownership of the collected licenses…';
+    dialog.beginVerification(snapshot.stats.pages, snapshot.licenses.length);
     const owned = await fetchOwnedPackages(signal);
     signal.throwIfAborted();
     if (state.pendingScan !== snapshot || snapshot.context !== scanContext()) {
         throw new Error('Filters or metadata changed. Scan again before reviewing licenses.');
     }
     state.ownedPackages = owned;
-    state.scanStats = snapshot.stats;
-    for (const id of state.scanStats.seen) {
-        if (!owned.has(id)) {
-            state.scanStats.notOwned.add(id);
-            state.scanStats.demo.delete(id);
-            state.scanStats.other.delete(id);
-            state.scanStats.unknown.delete(id);
-        }
+    // Only candidates counted by the scanner belong in this balance. Metadata
+    // exclusions were already applied and must not be counted a second time.
+    state.scanStats = {
+        ...snapshot.stats,
+        unconfirmed: new Set(snapshot.licenses.filter(license => !owned.has(license.packageId) && snapshot.outcomes.get(license.packageId)?.status !== 'removed').map(license => license.packageId))
+    };
+    // A stale ownership response must never put a confirmed removal back in the queue.
+    state.scannedLicenses = snapshot.licenses.filter(license => owned.has(license.packageId) && snapshot.outcomes.get(license.packageId)?.status !== 'removed');
+    for (const license of snapshot.licenses) {
+        if (owned.has(license.packageId) && snapshot.outcomes.get(license.packageId)?.status !== 'removed') snapshot.outcomes.delete(license.packageId);
     }
-    state.scannedLicenses = snapshot.licenses.filter(license => owned.has(license.packageId));
-    state.scanSummary = snapshot.summary;
+    state.scanSummary = {
+        ...snapshot.summary, confirmed: state.scannedLicenses.length,
+        unconfirmed: state.scanStats.unconfirmed.size, ownedPackages: owned.size,
+        removed: [...snapshot.outcomes.values()].filter(outcome => outcome.status === 'removed').length
+    };
     state.scanContext = snapshot.context;
+    state.collectedScan = snapshot;
     state.pendingScan = null;
+};
+
+const showCollectionRecoveryModal = error => {
+    const snapshot = state.pendingScan;
+    const pages = snapshot.stats.pages, candidates = snapshot.licenses.length;
+    showModal('Scan Failed', `<p>${escapeHTML(error.message)}</p>
+        <p>Kept ${pages} completed ${pages === 1 ? 'page' : 'pages'} with ${candidates} ${candidates === 1 ? 'candidate' : 'candidates'}. The failed page is not included. No removal requests were sent by this scan.</p>
+        <p>You may explicitly use these completed pages as a partial scan. Ownership must still be checked before review.</p>`, [
+        { id: 'use-completed-pages', text: 'Use completed pages', closes: true, class: 'slc-primary', onClick: retryPendingScan },
+        { id: 'inspect-candidates-button', text: 'Inspect collected data', onClick: showScanDiagnostics },
+        { id: 'discard-collected-pages', text: 'Discard collected data', closes: true, onClick: invalidateScan }
+    ]);
 };
 
 const showOwnershipRetryModal = error => {
     const pages = state.pendingScan.stats.pages;
     showModal('Scan Failed', `<p>${escapeHTML(error.message)}</p>
-        <p>Kept results from ${pages} completed ${pages === 1 ? 'page' : 'pages'} in this tab. No licenses were removed. Retry only the ownership check; the collected pages will not be scanned again.</p>
+        <p>Kept results from ${pages} completed ${pages === 1 ? 'page' : 'pages'} in this tab. No removal requests were sent by this ownership check. Retry only the ownership check; the collected pages will not be scanned again.</p>
         <p><a href="https://store.steampowered.com/account/" target="_blank" rel="noopener noreferrer">Open Steam Store account</a> if your Store session needs refreshing.</p>`, [{
         id: 'retry-ownership-check', text: 'Retry ownership check', class: 'slc-primary', closes: true,
         onClick: retryPendingScan
-    }]);
+    }, { id: 'inspect-candidates-button', text: 'Inspect collected candidates', onClick: showScanDiagnostics }]);
 };
 
 const retryPendingScan = async () => {
-    if (state.isScanning || state.isCleaning || state.isImporting || !state.pendingScan) return;
-    const snapshot = state.pendingScan;
+    if (state.isScanning || state.isCleaning || state.isImporting || state.requiresRescan) return;
+    const snapshot = state.pendingScan || state.collectedScan;
+    if (!snapshot) return;
     if (snapshot.context !== scanContext()) {
         invalidateScan();
         showInfoModal('Scan Again', 'Your filters or metadata changed. Scan again before reviewing licenses.');
         return;
     }
     state.isScanning = true;
+    snapshot.recoveryAccepted = true;
+    // A failed refresh must not leave a previously verified list actionable.
+    state.pendingScan = snapshot;
+    state.scannedLicenses = [];
+    state.scanContext = null;
+    state.scanSummary = null;
     state.scanController = new AbortController();
     const signal = state.scanController.signal;
     setControlsDisabled(true);
-    const { modal, finishButton, statusElement, updateCounts } = createScanDialog(() => {}, () => state.scanController?.abort());
-    modal.querySelector('h2').textContent = 'Checking collected licenses';
+    const dialog = createScanDialog(() => {}, () => state.scanController?.abort());
+    const { modal, finishButton } = dialog;
     finishButton.hidden = true;
-    updateCounts(snapshot.stats.pages, snapshot.licenses.length);
     try {
-        await verifyCollectedScan(snapshot, signal, statusElement);
+        await verifyCollectedScan(snapshot, signal, dialog);
         modal.closeDialog();
         showReviewModal();
     } catch (error) {
         modal.closeDialog();
         if (signal.aborted) {
             invalidateScan();
-            showInfoModal('Scan Cancelled', 'The collected results were discarded. No licenses were removed.');
+            showInfoModal('Scan Cancelled', 'The collected results were discarded. No removal requests were sent by this ownership check.');
         } else if (state.pendingScan) {
             showOwnershipRetryModal(error);
         } else {
@@ -169,14 +199,15 @@ const scanAllPages = async () => {
     const pageSignal = pageController.signal;
     let stopRequested = false;
     state.ownedPackages = null;
-    state.scanStats = { demo: new Set(), other: new Set(), unknown: new Set(), seen: new Set(), notOwned: new Set(), pages: 0 };
+    state.scanStats = createScanStats();
     setControlsDisabled(true);
-    const { modal, statusElement, finishButton, updateCounts } = createScanDialog(() => {
+    const dialog = createScanDialog(() => {
         stopRequested = true;
         finishButton.disabled = true;
         finishButton.textContent = 'Finishing scan…';
         pageController.abort();
     }, () => state.scanController?.abort());
+    const { modal, statusElement, finishButton, updateCounts } = dialog;
 
     const allLicenses = [];
     const existingIds = new Set();
@@ -185,6 +216,7 @@ const scanAllPages = async () => {
     let pageURL = new URL('/account/licenses/?l=english', window.location.origin);
 
     const context = scanContext();
+    let pageError = null;
     try {
         const startDate = document.getElementById('start-date-input').valueAsDate;
         const endDate = document.getElementById('end-date-input').valueAsDate;
@@ -196,7 +228,7 @@ const scanAllPages = async () => {
                 pageSignal.throwIfAborted();
                 if (visitedURLs.has(pageURL.href)) throw new Error('Steam returned a repeated next-page link.');
                 visitedURLs.add(pageURL.href);
-                statusElement.textContent = `Reading license page ${page}…`;
+                statusElement.textContent = 'Reading licenses…';
 
                 let response;
                 for (let attempt = 0; attempt < 4; attempt++) {
@@ -205,7 +237,7 @@ const scanAllPages = async () => {
                     if (response.status !== 429) break;
                     if (attempt === 3) throw new Error('Steam is still rate limiting the scan. Try again later.');
                     const delay = retryDelay(response, attempt);
-                    statusElement.textContent = `Steam rate limit — retrying page ${page} in ${delay / 1000}s…`;
+                    statusElement.textContent = `Steam rate limit — retrying in ${delay / 1000}s…`;
                     await wait(delay, pageSignal);
                 }
                 if (!response.ok) throw new Error(`Could not scan page ${page} (HTTP ${response.status}).`);
@@ -214,7 +246,13 @@ const scanAllPages = async () => {
                 const doc = new DOMParser().parseFromString(text, 'text/html');
                 const table = doc.querySelector('.account_table');
                 if (!table) throw new Error(`No license table on page ${page}. Check that you are signed in to Steam.`);
-                const licensesOnPage = parseTableForDetails(table);
+                // Commit statistics only once the entire page has parsed successfully.
+                const pageStats = createScanStats();
+                const licensesOnPage = parseTableForDetails(table, pageStats);
+                for (const key of ['demo', 'other', 'unknown', 'seen']) {
+                    for (const id of pageStats[key]) state.scanStats[key].add(id);
+                }
+                for (const [id, details] of pageStats.unknownDetails) state.scanStats.unknownDetails.set(id, details);
                 licensesOnPage.forEach(license => {
                     if (!existingIds.has(license.packageId)) {
                         allLicenses.push(license);
@@ -237,20 +275,29 @@ const scanAllPages = async () => {
                 await wait(500, pageSignal);
             }
         } catch (error) {
-            // Only an explicit request to use collected results permits a partial
-            // review. Ordinary failures and Discard never do.
-            if (!stopRequested || signal.aborted) throw error;
+            if (signal.aborted) throw error;
+            if (!stopRequested) {
+                if (!state.scanStats.pages) throw error;
+                pageError = error;
+            }
         }
 
         signal.throwIfAborted();
         finishButton.disabled = true;
         const snapshot = {
-            licenses: allLicenses, stats: state.scanStats, context,
-            summary: { complete: !stopRequested, pages: state.scanStats.pages, found: allLicenses.length }
+            licenses: allLicenses, stats: state.scanStats, context, outcomes: new Map(),
+            summary: { complete: !stopRequested && !pageError, pages: state.scanStats.pages, found: allLicenses.length,
+                error: pageError?.message || '' }
         };
         state.pendingScan = snapshot;
+        state.collectedScan = snapshot;
         updateWorkspaceStatus();
-        await verifyCollectedScan(snapshot, signal, statusElement);
+        if (pageError) {
+            modal.closeDialog();
+            showCollectionRecoveryModal(pageError);
+            return;
+        }
+        await verifyCollectedScan(snapshot, signal, dialog);
         modal.closeDialog();
         showReviewModal();
     } catch (error) {
