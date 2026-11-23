@@ -1,10 +1,8 @@
 # Steam License Cleanup 2.0
 
-![Made with AI](https://img.shields.io/badge/Made%20with-AI-76ddcf)
+![Made with AI](https://raw.githubusercontent.com/ajsem1337/ajsem1337/main/assets/made-with-ai.svg)
 
 A userscript for reviewing and removing unwanted free Steam licenses from your [account licenses page](https://store.steampowered.com/account/licenses/).
-
-Choose a cleanup profile, scan licenses, then review the results before confirming removal. The panel groups profile and verification controls beside scan range and removal pace. The review supports search, sorting, and exporting selected entries without removing them.
 
 ## Installation
 
@@ -17,6 +15,8 @@ Installation and updates use `main`. Keep only one copy enabled. Existing filter
 Report problems in [Issues](https://github.com/ajsem1337/Steam-License-Cleanup/issues), including your browser, userscript manager, selected profile, and steps to reproduce.
 
 ## Cleanup profiles
+
+Choose a cleanup profile, scan licenses, then review the results before confirming removal. The panel groups profile and verification controls beside scan range and removal pace. The review supports search, sorting, and exporting selected entries without removing them.
 
 - **Verified demos** (default): checks application types using imported Steam metadata.
 - **Playtests / beta / alpha**, **Trailers / videos**, **Soundtracks**: ready-made name filters, without application-type verification.
@@ -104,6 +104,6 @@ Based on [PatrickJnr/Steam-License-Cleanup](https://github.com/PatrickJnr/Steam-
 
 [MIT License](LICENSE).
 
-## AI assistance
+---
 
-**Made with AI.** This project was developed with AI assistance, including code, documentation, and testing.
+<p align="center"><sub>Built by <a href="https://github.com/ajsem1337">ajsem</a> with AI assistance.</sub></p>
